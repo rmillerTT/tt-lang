@@ -636,6 +636,7 @@ def TTLLowerDPrintToEmitC
 def TTLLowerSignpostToEmitC
     : Pass<"ttl-lower-signpost-to-emitc", "::mlir::ModuleOp"> {
   let summary = "Lower ttl.signpost ops to EmitC verbatim for profiling";
+  let dependentDialects = ["mlir::emitc::EmitCDialect"];
   let description = [{
     Converts ttl.signpost operations to EmitC verbatim code that emits
     DeviceZoneScopedN markers for Tracy profiling. This pass runs after

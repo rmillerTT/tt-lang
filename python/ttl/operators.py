@@ -646,6 +646,14 @@ def node(*, dims):
     return (ttl.core_x(), ttl.core_y())
 
 
+def is_in_grid(coordinates):
+    """Test current-core membership in static (x, y) coordinates.
+
+    Lowers to coordinate comparisons that fold during core specialization.
+    """
+    raise RuntimeError("ttl.is_in_grid() is only valid inside a TTL operation")
+
+
 @syntax("grid_size")
 def grid_size(*, dims):
     """
@@ -1178,6 +1186,7 @@ __all__ = [
     "copy",
     "reset_dataflow_buffers",
     "core",
+    "is_in_grid",
     "grid_size",
     "signpost",
     "matmul",

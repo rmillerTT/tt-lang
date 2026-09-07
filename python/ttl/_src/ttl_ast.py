@@ -316,6 +316,13 @@ class TTLGenericCompiler(TTCompilerBase):
         """Override to set location context, catch errors, and inject auto-profiling."""
         with self._loc_for_node(node):
             try:
+                if (
+                    isinstance(node.func, ast.Attribute)
+                    and self._is_ttl_module_access(node.func)
+                    and node.func.attr == "is_in_grid"
+                ):
+                    return self._emit_grid_membership(node)
+
                 # Intercept print() to handle keyword arguments.
                 if (
                     not isinstance(node.func, ast.Attribute)
@@ -346,6 +353,39 @@ class TTLGenericCompiler(TTCompilerBase):
                 if isinstance(e, TTLangCompileError):
                     raise
                 self._raise_error(node, str(e))
+
+    def _emit_grid_membership(self, node):
+        if len(node.args) != 1 or node.keywords:
+            self._raise_error(node, "ttl.is_in_grid() requires one coordinate sequence")
+        grid_node = node.args[0]
+        if isinstance(grid_node, ast.Name):
+            coordinates = self.fn_globals.get(grid_node.id)
+        else:
+            try:
+                coordinates = ast.literal_eval(grid_node)
+            except (ValueError, TypeError):
+                coordinates = None
+        if not isinstance(coordinates, (tuple, list)) or any(
+            not isinstance(coordinate, (tuple, list))
+            or len(coordinate) != 2
+            or any(type(axis) is not int or axis < 0 for axis in coordinate)
+            for coordinate in coordinates
+        ):
+            self._raise_error(
+                node,
+                "ttl.is_in_grid() requires static nonnegative (x, y) coordinates",
+            )
+        x, y = ttl.core_x(), ttl.core_y()
+        active = arith.ConstantOp(IntegerType.get_signless(1), 0).result
+        for cx, cy in coordinates:
+            matches_x = arith.cmpi(
+                arith.CmpIPredicate.eq, x, arith.ConstantOp(x.type, cx).result
+            )
+            matches_y = arith.cmpi(
+                arith.CmpIPredicate.eq, y, arith.ConstantOp(y.type, cy).result
+            )
+            active = arith.ori(active, arith.andi(matches_x, matches_y))
+        return active
 
     def visit_AugAssign(self, node):
         """Handle augmented assignment on tensor values.
@@ -894,7 +934,9 @@ class TTLGenericCompiler(TTCompilerBase):
             cb._cb_index,
             block_count=cb.block_count,
             address_scope=(
-                StringAttr.get(cb.address_scope) if cb.address_scope is not None else None
+                StringAttr.get(cb.address_scope)
+                if cb.address_scope is not None
+                else None
             ),
         )
 
@@ -1554,9 +1596,7 @@ class TTLGenericCompiler(TTCompilerBase):
                 )
             ta_values = []
             for elt in ta_node.elts:
-                ta_values.append(
-                    self._resolve_int_value(elt, "template_args element")
-                )
+                ta_values.append(self._resolve_int_value(elt, "template_args element"))
             template_args_attr = ArrayAttr.get(
                 [
                     IntegerAttr.get(IntegerType.get_signless(64, self.ctx), v)
@@ -1574,9 +1614,7 @@ class TTLGenericCompiler(TTCompilerBase):
             func_args = [self.visit(elt) for elt in fa_node.elts]
 
         if "include_paths" in kw_map:
-            paths = self._resolve_string_list(
-                kw_map["include_paths"], "include_paths"
-            )
+            paths = self._resolve_string_list(kw_map["include_paths"], "include_paths")
             self._opaque_include_paths.extend(paths)
 
         result_types = []

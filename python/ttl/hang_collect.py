@@ -26,6 +26,7 @@ are the caller's calls to make.
 
 import json
 import os
+import re
 import select
 import sys
 import time
@@ -172,6 +173,7 @@ def kernel_elfs(programs: list, cache_root) -> dict:
                 key=lambda p: p.stat().st_mtime,
                 reverse=True,
             )
+            core = re.search(r"_c(\d+)_(\d+)_", stem)
             for elf in matches:
                 if elf.name.endswith(".xip.elf") or "_weakened" in elf.name:
                     continue
@@ -179,6 +181,13 @@ def kernel_elfs(programs: list, cache_root) -> dict:
                 paths = by_risc.setdefault(risc, [])
                 if str(elf) not in paths:
                     paths.append(str(elf))
+                # --ttl-specialize-cores emits one kernel per core; symbolizing a
+                # core against another core's binary silently yields wrong frames.
+                if core is not None:
+                    key = f"{risc}@{int(core.group(1))},{int(core.group(2))}"
+                    exact = by_risc.setdefault(key, [])
+                    if str(elf) not in exact:
+                        exact.append(str(elf))
     return by_risc
 
 
@@ -236,9 +245,7 @@ def resolve_cache_root(report: Report) -> Path:
     tried = []
     for candidate in cache_roots():
         tried.append(str(candidate))
-        if any(candidate.glob("*/firmware")) or any(
-            candidate.glob("*/kernels")
-        ):
+        if any(candidate.glob("*/firmware")) or any(candidate.glob("*/kernels")):
             report.say(f"kernel cache: {candidate}")
             return candidate
     report.say(f"no built kernel cache found; PCs only. Tried: {', '.join(tried)}")
@@ -403,7 +410,13 @@ def symbolize(
     core. Walking further up the stack needs the core halted to read registers,
     which on Blackhole is terminal, so the top frames are all this collects.
     """
-    candidates = elfs.get(risc_name, [])
+    candidates = elfs.get(f"{risc_name}@{x},{y}")
+    if candidates:
+        candidates = candidates + [
+            path for path in elfs.get(risc_name, []) if "firmware" in Path(path).parts
+        ]
+    else:
+        candidates = elfs.get(risc_name, [])
     if not candidates:
         return ["    (no ELF found for this risc; PC is unsymbolized)"]
 
@@ -412,9 +425,11 @@ def symbolize(
         from ttexalens.tt_exalens_lib import top_callstack
 
         offsets = [
-            kernel_load_offset
-            if "kernels" in Path(path).parts and "firmware" not in Path(path).parts
-            else None
+            (
+                kernel_load_offset
+                if "kernels" in Path(path).parts and "firmware" not in Path(path).parts
+                else None
+            )
             for path in candidates
         ]
         frames = top_callstack(
@@ -422,6 +437,7 @@ def symbolize(
             candidates,
             offsets,
             context=context,
+            extract_variables=False,
         )
         lines.extend(f"    {frame_text(frame)}" for frame in frames)
         if not frames:
@@ -514,9 +530,7 @@ def sample_device(
     stacks = []
     for device_id in devices:
         stacks.extend(
-            collect_stacks(
-                context, device_id, cores, elfs, report, firmware_elf
-            )
+            collect_stacks(context, device_id, cores, elfs, report, firmware_elf)
         )
     return stacks
 

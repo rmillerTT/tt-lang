@@ -38,7 +38,11 @@ def make_reset_dataflow_buffers_typecast(tile_count, iterations):
             ]
         )
 
-    @ttl.operation(grid=(1, 1), runtime_resource_factory=runtime_resource_factory)
+    @ttl.operation(
+        grid=(1, 1),
+        runtime_resource_factory=runtime_resource_factory,
+        options="--ttl-specialize-cores",
+    )
     def operation(bf16_in, f32_out, f32_in, bf16_out):
         first_in = ttl.make_dataflow_buffer_like(bf16_in, shape=(1, 1), block_count=2)
         first_out = ttl.make_dataflow_buffer_like(f32_out, shape=(1, 1), block_count=2)
@@ -80,7 +84,15 @@ reset_dataflow_buffers_typecast = make_reset_dataflow_buffers_typecast(
 )
 
 
-def test_reset_dataflow_buffers_typecast(device):
+@pytest.fixture
+def reset_device():
+    device = ttnn.open_device(device_id=0, l1_small_size=16 * 1024)
+    yield device
+    ttnn.close_device(device)
+
+
+def test_reset_dataflow_buffers_typecast(reset_device):
+    device = reset_device
     shape = (TILE_COUNT * ttnn.TILE_SIZE, ttnn.TILE_SIZE)
     bf16_input = torch.randn(shape, dtype=torch.bfloat16)
     f32_input = torch.randn(shape, dtype=torch.float32)

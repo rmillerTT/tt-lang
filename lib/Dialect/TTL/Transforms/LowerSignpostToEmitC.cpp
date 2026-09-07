@@ -4,6 +4,7 @@
 
 #include "ttlang/Dialect/TTL/Passes.h"
 
+#include <map>
 #include <set>
 
 #include "mlir/Dialect/EmitC/IR/EmitC.h"
@@ -100,6 +101,8 @@ struct SignpostLowering : OpConversionPattern<SignpostOp> {
   // Set of names whose end signpost should emit a closing brace.
   // Populated by begin signpost handlers when the pair contains ttkernel ops.
   std::set<std::string> &keptEndNames;
+  mutable std::map<std::string, std::string> explicitEndNames;
+  mutable unsigned nextScopeId = 0;
 
   SignpostLowering(MLIRContext *ctx, std::set<std::string> &keptEndNames)
       : OpConversionPattern(ctx), keptEndNames(keptEndNames) {}
@@ -114,12 +117,15 @@ struct SignpostLowering : OpConversionPattern<SignpostOp> {
       bool hasInterestingOps = false;
       SignpostOp endOp = findMatchingEnd(op, hasInterestingOps);
 
-      if (hasInterestingOps) {
+      if (hasInterestingOps || name.starts_with("ttl_")) {
         if (endOp && hasEscapingValues(op, endOp)) {
-          op.emitWarning("skipping profiler scope for '")
-              << name
-              << "': value defined in scope is used after scope exits. "
-                 "PLEASE FILE A BUG.";
+          std::string identifier =
+              "ttl_profile_scope_" + std::to_string(nextScopeId++);
+          createEmitCVerbatim(loc,
+                              "DeviceZoneBeginN(\"" + name.str() + "\", " +
+                                  identifier + ");",
+                              rewriter);
+          explicitEndNames.emplace(name.str(), identifier);
         } else {
           createEmitCVerbatim(loc, "{", rewriter);
           createEmitCVerbatim(loc, "DeviceZoneScopedN(\"" + name.str() + "\");",
@@ -128,7 +134,12 @@ struct SignpostLowering : OpConversionPattern<SignpostOp> {
         }
       }
     } else {
-      if (keptEndNames.count(name.str())) {
+      auto explicitEnd = explicitEndNames.find(name.str());
+      if (explicitEnd != explicitEndNames.end()) {
+        createEmitCVerbatim(loc, "DeviceZoneEnd(" + explicitEnd->second + ");",
+                            rewriter);
+        explicitEndNames.erase(explicitEnd);
+      } else if (keptEndNames.count(name.str())) {
         createEmitCVerbatim(loc, "}", rewriter);
         keptEndNames.erase(name.str());
       }

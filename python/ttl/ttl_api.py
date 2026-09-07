@@ -2356,7 +2356,6 @@ def _lower_program_to_kernel(
             "canonicalize",
             "cse",
             "lower-affine",
-            "ttl-lower-signpost-to-emitc",
         ]
         if compiler_options.specialize_cores:
             pipeline_passes += [
@@ -2365,7 +2364,15 @@ def _lower_program_to_kernel(
                 "cse",
                 "ttkernel-analyze-dfb-resources",
             ]
+        # Signpost lowering MUST run after specialize-cores + canonicalize/cse.
+        # Its hasEscapingValues guard analyses whichever IR it sees; run before
+        # specialization it sees the shared IR, where `if is_sender:` still
+        # guards the region. Specialization then folds that branch to
+        # straight-line code on the sender core and cse may hoist a definition
+        # across the emitted brace, producing "'vNN' was not declared in this
+        # scope" for that core only. See docs/blaze_parity_porting_errors.md K5.
         pipeline_passes += [
+            "ttl-lower-signpost-to-emitc",
             "func.func(convert-ttkernel-to-emitc)",
             "symbol-dce",
         ]

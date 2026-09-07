@@ -44,7 +44,7 @@ else:
     from ttl._generated_elementwise import *  # noqa: F401,F403
     from ttl._generated_elementwise import __all__ as _elementwise_all
 
-    from ttl.operators import signpost
+    from ttl.operators import is_in_grid, signpost
     from ttl.compiler_options import CompilerOptions
     from ttl.ttl_api import (
         CircularBuffer,  # Deprecated, superseded by DataflowBuffer
@@ -83,6 +83,7 @@ else:
         "copy",
         "reset_dataflow_buffers",
         "node",
+        "is_in_grid",
         "grid_size",
         "math",
         "signpost",

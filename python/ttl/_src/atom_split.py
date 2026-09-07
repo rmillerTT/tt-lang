@@ -102,6 +102,7 @@ _TTL_OPS: Dict[str, str] = {
     "make_dataflow_buffer_like": "control",
     "reset_dataflow_buffers": "control",
     "node": "control",
+    "is_in_grid": "control",
     "grid_size": "control",
     "dims": "control",
     "cores": "control",
@@ -150,6 +151,7 @@ def _explicit_extern_thread(call: ast.Call) -> Optional[str]:
             if value in THREADS:
                 return value
     return None
+
 
 # Methods on a DFB name that produce a block.
 _DFB_PRODUCING_METHODS: Set[str] = {"wait", "reserve"}
