@@ -82,13 +82,14 @@ def get_min_remaining_l1_for_device(device):
     return max(0, first_occupied - cb_base)
 
 
-def get_remaining_l1_by_core_for_device(device, core_coordinates):
+def get_remaining_l1_by_core_for_device(device, core_coordinates, tensors=()):
     """Return the minimum remaining CB budget for each logical worker core.
 
-    Buffer-page reports include logical core coordinates and device ids.  A
-    mesh may place a different lowest L1 tensor page on the same logical core
-    of different devices, so retain the minimum address across devices for
-    each coordinate without collapsing unrelated cores together.
+    Buffer-page reports use physical worker coordinates. Convert the requested
+    logical program cores before matching pages. A mesh may place a different
+    lowest L1 tensor page on the same logical core of different devices, so
+    retain the minimum address across devices without collapsing unrelated
+    cores together.
     """
 
     _ensure_ttnn()
@@ -98,15 +99,71 @@ def get_remaining_l1_by_core_for_device(device, core_coordinates):
     info = ttnn._ttnn.reports.get_device_info(device)
     cb_base = int(info.address_at_first_l1_cb_buffer)
     cb_limit_address = cb_base + int(info.cb_limit)
-    first_occupied = {
-        tuple(core): cb_limit_address for core in core_coordinates
-    }
+    logical_cores = [tuple(core) for core in core_coordinates]
+    physical_to_logical = {}
+    for logical_core in logical_cores:
+        if hasattr(device, "worker_core_from_logical_core"):
+            physical_core = device.worker_core_from_logical_core(
+                ttnn.CoreCoord(*logical_core)
+            )
+            physical = (int(physical_core.x), int(physical_core.y))
+        else:
+            # Keep report-only test doubles and older runtimes usable.
+            physical = logical_core
+        physical_to_logical[physical] = logical_core
+
+    first_occupied = {core: cb_limit_address for core in logical_cores}
     for page in ttnn._ttnn.reports.get_buffer_pages(device):
         if page.buffer_type != ttnn.BufferType.L1:
             continue
-        core = (int(page.core_x), int(page.core_y))
-        if core in first_occupied:
-            first_occupied[core] = min(first_occupied[core], int(page.page_address))
+        physical = (int(page.core_x), int(page.core_y))
+        logical = physical_to_logical.get(physical)
+        if logical is not None:
+            first_occupied[logical] = min(
+                first_occupied[logical], int(page.page_address)
+            )
+
+    # Experimental per-core allocations are intentionally absent from the
+    # ordinary mesh buffer-page report. Tensor arguments still expose their
+    # exact address on every (device, logical core), so fold those allocations
+    # into the same upper bound before sizing static CBs.
+    for tensor in tensors:
+        is_per_core = getattr(tensor, "is_per_core_allocated", None)
+        if not callable(is_per_core) or not is_per_core():
+            continue
+        device_coords = getattr(tensor, "device_coords", None)
+        per_core_address = getattr(
+            tensor, "experimental_per_core_buffer_address", None
+        )
+        if not callable(device_coords) or not callable(per_core_address):
+            continue
+        tensor_cores = logical_cores
+        try:
+            shard_spec = tensor.memory_config().shard_spec
+            tensor_cores = [
+                (int(core.x), int(core.y))
+                for core in ttnn.corerange_to_cores(
+                    shard_spec.grid, row_wise=True
+                )
+                if (int(core.x), int(core.y)) in first_occupied
+            ]
+        except (AttributeError, TypeError):
+            # Older runtimes and lightweight test doubles may not expose a
+            # shard grid. Fall back to probing the requested program cores.
+            pass
+        for device_coord in device_coords():
+            for logical in tensor_cores:
+                try:
+                    address = int(
+                        per_core_address(
+                            device_coord, ttnn.CoreCoord(*logical)
+                        )
+                    )
+                except RuntimeError:
+                    continue
+                first_occupied[logical] = min(
+                    first_occupied[logical], address
+                )
 
     return {core: max(0, address - cb_base) for core, address in first_occupied.items()}
 
@@ -836,7 +893,9 @@ def _remaining_cb_budgets_by_core(
             continue
         device = tensor.device()
         if device is not None:
-            return get_remaining_l1_by_core_for_device(device, core_coordinates)
+            return get_remaining_l1_by_core_for_device(
+                device, core_coordinates, tensors
+            )
     return {core: DEFAULT_L1_CB_BUDGET_BYTES for core in core_coordinates}
 
 

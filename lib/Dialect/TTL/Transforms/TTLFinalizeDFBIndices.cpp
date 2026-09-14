@@ -732,11 +732,32 @@ struct TTLFinalizeDFBIndicesPass
           if (preserved) {
             continue;
           }
-          dfb.epochRepresentative[current]->emitError()
+          auto diagnostic = dfb.epochRepresentative[current]->emitError();
+          diagnostic
               << "dataflow buffer " << idx
               << " is used across a reset_dataflow_buffers boundary without "
                  "being preserved at reset ordinal "
               << ordinal;
+          diagnostic.attachNote(dfb.epochRepresentative[previous]->getLoc())
+              << "previous use is "
+              << dfb.epochRepresentative[previous]->getName().getStringRef()
+              << (isa<OpaqueCallOp>(dfb.epochRepresentative[previous])
+                      ? Twine(" '") +
+                            cast<OpaqueCallOp>(dfb.epochRepresentative[previous])
+                                .getCallee() +
+                            "'"
+                      : Twine())
+              << " in epoch " << previous;
+          diagnostic.attachNote(dfb.epochRepresentative[current]->getLoc())
+              << "current use is "
+              << dfb.epochRepresentative[current]->getName().getStringRef()
+              << (isa<OpaqueCallOp>(dfb.epochRepresentative[current])
+                      ? Twine(" '") +
+                            cast<OpaqueCallOp>(dfb.epochRepresentative[current])
+                                .getCallee() +
+                            "'"
+                      : Twine())
+              << " in epoch " << current;
           invalidResetContract = true;
         }
       }

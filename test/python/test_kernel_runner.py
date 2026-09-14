@@ -381,6 +381,83 @@ def test_remaining_l1_by_core_does_not_conflate_tensor_placements(monkeypatch):
     }
 
 
+def test_remaining_l1_by_core_translates_logical_to_physical(monkeypatch):
+    l1 = object()
+    reports = SimpleNamespace(
+        get_device_info=lambda _device: SimpleNamespace(
+            address_at_first_l1_cb_buffer=0x4A000,
+            cb_limit=0xE6000,
+        ),
+        get_buffer_pages=lambda _device: [
+            SimpleNamespace(
+                buffer_type=l1,
+                page_address=0x6A000,
+                core_x=17,
+                core_y=18,
+            ),
+        ],
+    )
+    fake_ttnn = SimpleNamespace(
+        BufferType=SimpleNamespace(L1=l1),
+        CoreCoord=lambda x, y: SimpleNamespace(x=x, y=y),
+        corerange_to_cores=lambda _grid, row_wise: [
+            SimpleNamespace(x=1, y=0)
+        ],
+        _ttnn=SimpleNamespace(reports=reports),
+    )
+    device = SimpleNamespace(
+        worker_core_from_logical_core=lambda core: SimpleNamespace(
+            x=core.x + 17, y=core.y + 18
+        )
+    )
+    monkeypatch.setattr(kernel_runner, "ttnn", fake_ttnn)
+
+    assert kernel_runner.get_remaining_l1_by_core_for_device(
+        device, {(0, 0), (1, 0)}
+    ) == {
+        (0, 0): 0x20000,
+        (1, 0): 0xE6000,
+    }
+
+
+def test_remaining_l1_by_core_includes_experimental_per_core_tensors(monkeypatch):
+    l1 = object()
+    reports = SimpleNamespace(
+        get_device_info=lambda _device: SimpleNamespace(
+            address_at_first_l1_cb_buffer=0x4A000,
+            cb_limit=0xE6000,
+        ),
+        get_buffer_pages=lambda _device: [],
+    )
+    fake_ttnn = SimpleNamespace(
+        BufferType=SimpleNamespace(L1=l1),
+        CoreCoord=lambda x, y: SimpleNamespace(x=x, y=y),
+        _ttnn=SimpleNamespace(reports=reports),
+    )
+
+    def per_core_address(device_coord, core):
+        if (core.x, core.y) != (1, 0):
+            raise RuntimeError("core is not allocated")
+        return 0x62000 + 0x1000 * device_coord[1]
+
+    tensor = SimpleNamespace(
+        is_per_core_allocated=lambda: True,
+        device_coords=lambda: [(0, 0), (0, 1)],
+        experimental_per_core_buffer_address=per_core_address,
+        memory_config=lambda: SimpleNamespace(
+            shard_spec=SimpleNamespace(grid=object())
+        ),
+    )
+    monkeypatch.setattr(kernel_runner, "ttnn", fake_ttnn)
+
+    assert kernel_runner.get_remaining_l1_by_core_for_device(
+        object(), {(0, 0), (1, 0)}, [tensor]
+    ) == {
+        (0, 0): 0xE6000,
+        (1, 0): 0x18000,
+    }
+
+
 def test_build_pipe_global_semaphores_empty_does_not_require_ttnn(monkeypatch):
     monkeypatch.setattr(kernel_runner, "ttnn", None)
 

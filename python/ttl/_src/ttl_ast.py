@@ -1553,9 +1553,11 @@ class TTLGenericCompiler(TTCompilerBase):
                     ta_node, "call_extern_func() template_args must be a list"
                 )
             ta_values = []
-            for elt in ta_node.elts:
+            for index, elt in enumerate(ta_node.elts):
                 ta_values.append(
-                    self._resolve_int_value(elt, "template_args element")
+                    self._resolve_int_value(
+                        elt, f"template_args[{index}] for {callee!r}"
+                    )
                 )
             template_args_attr = ArrayAttr.get(
                 [
@@ -1572,6 +1574,13 @@ class TTLGenericCompiler(TTCompilerBase):
                     fa_node, "call_extern_func() func_args must be a list"
                 )
             func_args = [self.visit(elt) for elt in fa_node.elts]
+            for index, (arg_node, value) in enumerate(zip(fa_node.elts, func_args)):
+                if value is None:
+                    self._raise_error(
+                        arg_node,
+                        f"call_extern_func() argument {index} to {callee!r} "
+                        "does not produce a value",
+                    )
 
         if "include_paths" in kw_map:
             paths = self._resolve_string_list(

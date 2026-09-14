@@ -97,6 +97,7 @@ from . import hang
 from .kernel_runner import (
     KernelSpec,
     get_min_remaining_l1_for_device,
+    get_remaining_l1_by_core_for_device,
     run_kernel_on_device,
     emit_runner_file,
 )
@@ -2228,6 +2229,27 @@ def _lower_program_to_kernel(
             ],
             ctx,
         )
+        try:
+            device = _require_device(args)
+            grid_x, grid_y = map(int, launch_grid)
+            core_coordinates = [
+                (x, y) for y in range(grid_y) for x in range(grid_x)
+            ]
+            remaining_l1_by_core = get_remaining_l1_by_core_for_device(
+                device, core_coordinates, args
+            )
+            module.operation.attributes["ttl.per_core_l1_budgets"] = ArrayAttr.get(
+                [
+                    IntegerAttr.get(
+                        IntegerType.get_signless(64, ctx),
+                        remaining_l1_by_core[coordinate],
+                    )
+                    for coordinate in core_coordinates
+                ],
+                ctx,
+            )
+        except ValueError:
+            pass
         if target_arch is not None:
             module.operation.attributes["ttl.target_arch"] = StringAttr.get(target_arch)
 

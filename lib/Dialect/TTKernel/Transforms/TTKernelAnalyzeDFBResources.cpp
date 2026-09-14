@@ -14,8 +14,8 @@
 
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/MapVector.h"
-#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/ErrorHandling.h"
 
@@ -46,10 +46,11 @@ constexpr llvm::StringLiteral kTensorAccessorGlobalIndexAttrName =
     "ttl.tensor_accessor_global_index";
 constexpr llvm::StringLiteral kLogicalConfigsAttrName =
     "ttl.logical_dfb_configs";
-constexpr llvm::StringLiteral kLogicalIndexAttrName =
-    "ttl.dfb_logical_index";
+constexpr llvm::StringLiteral kLogicalIndexAttrName = "ttl.dfb_logical_index";
 constexpr llvm::StringLiteral kPerCoreConfigsAttrName =
     "ttl.per_core_dfb_configs";
+constexpr llvm::StringLiteral kPerCoreL1BudgetsAttrName =
+    "ttl.per_core_l1_budgets";
 constexpr llvm::StringLiteral kEpochPhysicalConfigsAttrName =
     "ttl.dfb_epoch_physical_configs";
 constexpr llvm::StringLiteral kKernelUnpackToDestFp32AttrName =
@@ -57,8 +58,7 @@ constexpr llvm::StringLiteral kKernelUnpackToDestFp32AttrName =
 constexpr llvm::StringLiteral kResetEpochAttrName = "ttl.dfb_reset_epoch";
 constexpr llvm::StringLiteral kResetPreservedIndicesAttrName =
     "ttl.dfb_reset_preserved_indices";
-constexpr llvm::StringLiteral kResetCallee =
-    "ttlang::reset_dataflow_buffers";
+constexpr llvm::StringLiteral kResetCallee = "ttlang::reset_dataflow_buffers";
 constexpr size_t kResetConfigWords = 11;
 
 enum class AddressScope { Local, RemoteUniform, Legacy };
@@ -95,8 +95,8 @@ struct PhysicalConfig {
   AddressScope scope;
 
   bool operator==(const PhysicalConfig &other) const {
-    return physicalIndex == other.physicalIndex &&
-           numPages == other.numPages && scope == other.scope;
+    return physicalIndex == other.physicalIndex && numPages == other.numPages &&
+           scope == other.scope;
   }
 };
 
@@ -232,8 +232,8 @@ getCoveredCores(func::FuncOp func, int64_t gridX, int64_t gridY) {
     }
     auto x = dyn_cast<IntegerAttr>(coord[0]);
     auto y = dyn_cast<IntegerAttr>(coord[1]);
-    if (!x || !y || x.getInt() < 0 || x.getInt() >= gridX ||
-        y.getInt() < 0 || y.getInt() >= gridY) {
+    if (!x || !y || x.getInt() < 0 || x.getInt() >= gridX || y.getInt() < 0 ||
+        y.getInt() >= gridY) {
       return failure();
     }
     size_t index = static_cast<size_t>(y.getInt() * gridX + x.getInt());
@@ -269,6 +269,7 @@ struct EpochRemapPlan {
   int64_t localSlotCount = 0;
   SmallVector<SmallVector<int64_t>> oldSlotByPhysical;
   std::map<int64_t, int64_t> pinnedPhysicalByOld;
+  SmallVector<uint64_t> epochLowerBoundsByCore;
 
   int64_t physicalIndex(int64_t epoch, int64_t oldPhysicalIndex) const {
     auto pinned = pinnedPhysicalByOld.find(oldPhysicalIndex);
@@ -293,8 +294,8 @@ static EpochRemapPlan buildEpochRemapPlan(
     const llvm::MapVector<int64_t, LogicalConfig> &logicalConfigs,
     ArrayRef<llvm::SmallDenseSet<int64_t, 8>> logicalsByCore,
     const llvm::SmallDenseSet<int64_t, 8> &pinnedPhysicalIndices,
-    const std::map<int64_t, llvm::SmallDenseSet<int64_t, 8>>
-        &pinnedLiveEpochs) {
+    const std::map<int64_t, llvm::SmallDenseSet<int64_t, 8>> &pinnedLiveEpochs,
+    ArrayRef<uint64_t> l1BudgetsByCore) {
   EpochRemapPlan plan;
   int64_t maxEpoch = -1;
   int64_t maxPhysicalIndex = -1;
@@ -357,8 +358,8 @@ static EpochRemapPlan buildEpochRemapPlan(
     const uint64_t bytes =
         static_cast<uint64_t>(logical.numPages) * logical.pageBytes;
     if (logical.scope == AddressScope::Legacy) {
-      use.scope = use.active ? joinScope(use.scope, logical.scope)
-                             : logical.scope;
+      use.scope =
+          use.active ? joinScope(use.scope, logical.scope) : logical.scope;
       use.active = true;
       for (uint64_t &coreBytes : use.bytesByCore) {
         coreBytes = std::max(coreBytes, bytes);
@@ -373,8 +374,8 @@ static EpochRemapPlan buildEpochRemapPlan(
       }
     }
     if (logicalIsActive) {
-      use.scope = use.active ? joinScope(use.scope, logical.scope)
-                             : logical.scope;
+      use.scope =
+          use.active ? joinScope(use.scope, logical.scope) : logical.scope;
       use.active = true;
     }
   };
@@ -393,12 +394,46 @@ static EpochRemapPlan buildEpochRemapPlan(
     recordUse(epochUses[logical.epoch][logical.physicalIndex], logical);
   }
 
+  plan.epochLowerBoundsByCore.assign(coreCount, 0);
+  for (size_t epoch = 0; epoch < epochUses.size(); ++epoch) {
+    SmallVector<uint64_t> epochTotals(coreCount, 0);
+    auto addUse = [&](const auto &use) {
+      if (!use.active) {
+        return;
+      }
+      if (use.scope == AddressScope::Local) {
+        for (size_t core = 0; core < coreCount; ++core) {
+          epochTotals[core] += roundUpTo(use.bytesByCore[core], use.pageBytes);
+        }
+        return;
+      }
+      uint64_t uniformBytes = 0;
+      for (uint64_t coreBytes : use.bytesByCore) {
+        uniformBytes = std::max(uniformBytes, coreBytes);
+      }
+      for (size_t core = 0; core < coreCount; ++core) {
+        if (use.bytesByCore[core] != 0) {
+          epochTotals[core] += roundUpTo(uniformBytes, use.pageBytes);
+        }
+      }
+    };
+    for (const EpochSlotUse &use : epochUses[epoch]) {
+      addUse(use);
+    }
+    for (const PhysicalSlotUse &use : pinnedUsesByEpoch[epoch]) {
+      addUse(use);
+    }
+    for (size_t core = 0; core < coreCount; ++core) {
+      plan.epochLowerBoundsByCore[core] =
+          std::max(plan.epochLowerBoundsByCore[core], epochTotals[core]);
+    }
+  }
+
   plan.oldSlotByPhysical.resize(epochUses.size());
   for (size_t epoch = 0; epoch < epochUses.size(); ++epoch) {
     auto &assignment = plan.oldSlotByPhysical[epoch];
-    const int64_t assignmentSize = pinnedPhysicalIndices.empty()
-                                       ? plan.localSlotCount
-                                       : physicalSlotCount;
+    const int64_t assignmentSize =
+        pinnedPhysicalIndices.empty() ? plan.localSlotCount : physicalSlotCount;
     assignment.assign(static_cast<size_t>(assignmentSize), -1);
     for (int64_t oldIndex = 0; oldIndex < plan.localSlotCount; ++oldIndex) {
       if (epochUses[epoch][oldIndex].present) {
@@ -410,8 +445,7 @@ static EpochRemapPlan buildEpochRemapPlan(
   auto evaluate = [&](const auto &assignments) {
     SmallVector<PhysicalSlotUse> physicalUses;
     physicalUses.resize(static_cast<size_t>(physicalSlotCount));
-    auto mergeUse = [&](PhysicalSlotUse &physical,
-                        const auto &logicalUse) {
+    auto mergeUse = [&](PhysicalSlotUse &physical, const auto &logicalUse) {
       if (!logicalUse.present) {
         return;
       }
@@ -428,8 +462,8 @@ static EpochRemapPlan buildEpochRemapPlan(
                            : logicalUse.scope;
       physical.active = true;
       for (size_t core = 0; core < coreCount; ++core) {
-        physical.bytesByCore[core] = std::max(
-            physical.bytesByCore[core], logicalUse.bytesByCore[core]);
+        physical.bytesByCore[core] =
+            std::max(physical.bytesByCore[core], logicalUse.bytesByCore[core]);
       }
     };
     for (size_t epoch = 0; epoch < assignments.size(); ++epoch) {
@@ -442,8 +476,7 @@ static EpochRemapPlan buildEpochRemapPlan(
       }
       for (int64_t oldPinned : sortedPinnedIndices) {
         const int64_t physical = plan.pinnedPhysicalByOld.at(oldPinned);
-        mergeUse(physicalUses[physical],
-                 pinnedUsesByEpoch[epoch][oldPinned]);
+        mergeUse(physicalUses[physical], pinnedUsesByEpoch[epoch][oldPinned]);
       }
     }
 
@@ -469,38 +502,73 @@ static EpochRemapPlan buildEpochRemapPlan(
         }
       }
     }
-    llvm::sort(totals, std::greater<uint64_t>());
-    return totals;
+    if (l1BudgetsByCore.empty()) {
+      llvm::sort(totals, std::greater<uint64_t>());
+      SmallVector<int64_t> objective;
+      objective.reserve(totals.size());
+      for (uint64_t total : totals) {
+        objective.push_back(static_cast<int64_t>(total));
+      }
+      return objective;
+    }
+    assert(l1BudgetsByCore.size() == totals.size());
+    SmallVector<int64_t> objective;
+    objective.reserve(totals.size());
+    for (auto [total, budget] : llvm::zip(totals, l1BudgetsByCore)) {
+      objective.push_back(static_cast<int64_t>(total) -
+                          static_cast<int64_t>(budget));
+    }
+    llvm::sort(objective, std::greater<int64_t>());
+    return objective;
   };
-  auto isBetter = [](ArrayRef<uint64_t> lhs, ArrayRef<uint64_t> rhs) {
+  auto isBetter = [](ArrayRef<int64_t> lhs, ArrayRef<int64_t> rhs) {
     return std::lexicographical_compare(lhs.begin(), lhs.end(), rhs.begin(),
                                         rhs.end());
   };
 
   const auto identityAssignments = plan.oldSlotByPhysical;
   auto identityObjective = evaluate(identityAssignments);
-  auto greedyAssignments = identityAssignments;
   const size_t firstGreedyEpoch = pinnedPhysicalIndices.empty() ? 1 : 0;
-  for (size_t epoch = firstGreedyEpoch;
-       epoch < greedyAssignments.size(); ++epoch) {
-    greedyAssignments[epoch].assign(
-        greedyAssignments[epoch].size(), -1);
-  }
   SmallVector<size_t> epochOrder;
   for (size_t epoch = firstGreedyEpoch; epoch < epochUses.size(); ++epoch) {
     epochOrder.push_back(epoch);
   }
+  auto normalizedPressure = [&](ArrayRef<uint64_t> bytesByCore) {
+    double pressure = 0.0;
+    for (auto [bytes, budget] : llvm::zip(bytesByCore, l1BudgetsByCore)) {
+      if (budget == 0) {
+        if (bytes != 0) {
+          return std::numeric_limits<double>::infinity();
+        }
+        continue;
+      }
+      pressure = std::max(pressure, static_cast<double>(bytes) /
+                                        static_cast<double>(budget));
+    }
+    return pressure;
+  };
   llvm::sort(epochOrder, [&](size_t lhs, size_t rhs) {
     uint64_t lhsBytes = 0;
     uint64_t rhsBytes = 0;
+    SmallVector<uint64_t> lhsBytesByCore(coreCount, 0);
+    SmallVector<uint64_t> rhsBytesByCore(coreCount, 0);
     for (const EpochSlotUse &use : epochUses[lhs]) {
-      for (uint64_t bytes : use.bytesByCore) {
+      for (auto [core, bytes] : llvm::enumerate(use.bytesByCore)) {
         lhsBytes += bytes;
+        lhsBytesByCore[core] += bytes;
       }
     }
     for (const EpochSlotUse &use : epochUses[rhs]) {
-      for (uint64_t bytes : use.bytesByCore) {
+      for (auto [core, bytes] : llvm::enumerate(use.bytesByCore)) {
         rhsBytes += bytes;
+        rhsBytesByCore[core] += bytes;
+      }
+    }
+    if (!l1BudgetsByCore.empty()) {
+      double lhsPressure = normalizedPressure(lhsBytesByCore);
+      double rhsPressure = normalizedPressure(rhsBytesByCore);
+      if (lhsPressure != rhsPressure) {
+        return lhsPressure > rhsPressure;
       }
     }
     if (lhsBytes != rhsBytes) {
@@ -508,7 +576,7 @@ static EpochRemapPlan buildEpochRemapPlan(
     }
     return lhs < rhs;
   });
-  for (size_t epoch : epochOrder) {
+  auto assignEpochGreedily = [&](auto &assignments, size_t epoch) {
     SmallVector<int64_t> oldIndices;
     for (int64_t oldIndex = 0; oldIndex < plan.localSlotCount; ++oldIndex) {
       if (epochUses[epoch][oldIndex].present) {
@@ -518,6 +586,15 @@ static EpochRemapPlan buildEpochRemapPlan(
     llvm::sort(oldIndices, [&](int64_t lhs, int64_t rhs) {
       uint64_t lhsBytes = 0;
       uint64_t rhsBytes = 0;
+      if (!l1BudgetsByCore.empty()) {
+        double lhsPressure =
+            normalizedPressure(epochUses[epoch][lhs].bytesByCore);
+        double rhsPressure =
+            normalizedPressure(epochUses[epoch][rhs].bytesByCore);
+        if (lhsPressure != rhsPressure) {
+          return lhsPressure > rhsPressure;
+        }
+      }
       for (uint64_t bytes : epochUses[epoch][lhs].bytesByCore) {
         lhsBytes = std::max(lhsBytes, bytes);
       }
@@ -531,11 +608,11 @@ static EpochRemapPlan buildEpochRemapPlan(
     });
     for (int64_t oldIndex : oldIndices) {
       int64_t bestPhysical = -1;
-      SmallVector<uint64_t> bestObjective;
+      SmallVector<int64_t> bestObjective;
       for (int64_t physical = 0;
-           physical < static_cast<int64_t>(greedyAssignments[epoch].size());
+           physical < static_cast<int64_t>(assignments[epoch].size());
            ++physical) {
-        if (greedyAssignments[epoch][physical] >= 0) {
+        if (assignments[epoch][physical] >= 0) {
           continue;
         }
         bool occupiedByPinned = false;
@@ -551,31 +628,48 @@ static EpochRemapPlan buildEpochRemapPlan(
         if (occupiedByPinned) {
           continue;
         }
-        greedyAssignments[epoch][physical] = oldIndex;
-        auto objective = evaluate(greedyAssignments);
-        greedyAssignments[epoch][physical] = -1;
+        assignments[epoch][physical] = oldIndex;
+        auto objective = evaluate(assignments);
+        assignments[epoch][physical] = -1;
         if (bestPhysical < 0 || isBetter(objective, bestObjective)) {
           bestPhysical = physical;
           bestObjective = std::move(objective);
         }
       }
       assert(bestPhysical >= 0 && "epoch has more DFB slots than its arena");
-      greedyAssignments[epoch][bestPhysical] = oldIndex;
+      assignments[epoch][bestPhysical] = oldIndex;
     }
-  }
+  };
+  auto buildGreedyAssignments = [&](ArrayRef<size_t> orderedEpochs) {
+    auto assignments = identityAssignments;
+    for (size_t epoch = firstGreedyEpoch; epoch < assignments.size(); ++epoch) {
+      assignments[epoch].assign(assignments[epoch].size(), -1);
+    }
+    for (size_t epoch : orderedEpochs) {
+      assignEpochGreedily(assignments, epoch);
+    }
+    return assignments;
+  };
 
+  auto greedyAssignments = buildGreedyAssignments(epochOrder);
   auto greedyObjective = evaluate(greedyAssignments);
+
   if (!pinnedPhysicalIndices.empty() ||
       isBetter(greedyObjective, identityObjective)) {
     plan.oldSlotByPhysical = std::move(greedyAssignments);
   }
   auto currentObjective = evaluate(plan.oldSlotByPhysical);
-  while (true) {
+  // A supplied per-core budget is a feasibility target, not a request to
+  // minimize unused L1.  Stop once every core fits; continuing the pairwise
+  // search can take minutes in large fused programs without changing whether
+  // the program is valid.
+  while (l1BudgetsByCore.empty() || currentObjective.front() > 0) {
     int64_t bestEpoch = -1;
     int64_t bestLhs = -1;
     int64_t bestRhs = -1;
-    SmallVector<uint64_t> bestObjective = currentObjective;
-    for (size_t epoch = 1; epoch < plan.oldSlotByPhysical.size(); ++epoch) {
+    SmallVector<int64_t> bestObjective = currentObjective;
+    for (size_t epoch = firstGreedyEpoch; epoch < plan.oldSlotByPhysical.size();
+         ++epoch) {
       auto &assignment = plan.oldSlotByPhysical[epoch];
       for (int64_t lhs = 0; lhs < static_cast<int64_t>(assignment.size());
            ++lhs) {
@@ -619,8 +713,7 @@ static EpochRemapPlan buildEpochRemapPlan(
 
   if (!pinnedPhysicalIndices.empty()) {
     llvm::SmallDenseSet<int64_t, 8> usedPhysicalIndices;
-    for (const auto &[oldPhysical, newPhysical] :
-         plan.pinnedPhysicalByOld) {
+    for (const auto &[oldPhysical, newPhysical] : plan.pinnedPhysicalByOld) {
       (void)oldPhysical;
       usedPhysicalIndices.insert(newPhysical);
     }
@@ -631,8 +724,8 @@ static EpochRemapPlan buildEpochRemapPlan(
         }
       }
     }
-    SmallVector<int64_t> sortedUsedPhysicalIndices(
-        usedPhysicalIndices.begin(), usedPhysicalIndices.end());
+    SmallVector<int64_t> sortedUsedPhysicalIndices(usedPhysicalIndices.begin(),
+                                                   usedPhysicalIndices.end());
     llvm::sort(sortedUsedPhysicalIndices);
     std::map<int64_t, int64_t> compactPhysicalIndex;
     for (auto [newIndex, oldIndex] :
@@ -659,8 +752,7 @@ static EpochRemapPlan buildEpochRemapPlan(
 }
 
 struct TTKernelAnalyzeDFBResourcesPass
-    : impl::TTKernelAnalyzeDFBResourcesBase<
-          TTKernelAnalyzeDFBResourcesPass> {
+    : impl::TTKernelAnalyzeDFBResourcesBase<TTKernelAnalyzeDFBResourcesPass> {
   void runOnOperation() override {
     ModuleOp module = getOperation();
     auto configsAttr =
@@ -682,9 +774,8 @@ struct TTKernelAnalyzeDFBResourcesPass
     for (Attribute attr : configsAttr) {
       auto config = dyn_cast<DictionaryAttr>(attr);
       if (!config) {
-        module.emitOpError()
-            << "`" << kLogicalConfigsAttrName
-            << "` entries must be dictionaries";
+        module.emitOpError() << "`" << kLogicalConfigsAttrName
+                             << "` entries must be dictionaries";
         signalPassFailure();
         return;
       }
@@ -693,17 +784,16 @@ struct TTKernelAnalyzeDFBResourcesPass
       FailureOr<int64_t> epoch = getInteger(config, "epoch");
       FailureOr<int64_t> numPages = getInteger(config, "num_pages");
       auto elementType = config.getAs<TypeAttr>("element_type");
-      auto unpackToDestFp32 =
-          config.getAs<BoolAttr>("unpack_to_dest_fp32");
+      auto unpackToDestFp32 = config.getAs<BoolAttr>("unpack_to_dest_fp32");
       auto compilerAllocated = config.getAs<BoolAttr>("compiler_allocated");
       auto blockCount = config.getAs<IntegerAttr>("block_count");
       auto elemsPerBlock = config.getAs<IntegerAttr>("elems_per_block");
       FailureOr<AddressScope> scope = parseScope(config);
       if (failed(logicalIndex) || failed(physicalIndex) || failed(epoch) ||
           failed(numPages) || !elementType || !unpackToDestFp32 ||
-          failed(scope) ||
-          *logicalIndex < 0 || *physicalIndex < 0 || *epoch < 0 ||
-          *numPages <= 0 || (blockCount && blockCount.getInt() <= 0) ||
+          failed(scope) || *logicalIndex < 0 || *physicalIndex < 0 ||
+          *epoch < 0 || *numPages <= 0 ||
+          (blockCount && blockCount.getInt() <= 0) ||
           (elemsPerBlock && elemsPerBlock.getInt() <= 0)) {
         module.emitOpError() << "has malformed `" << kLogicalConfigsAttrName
                              << "` entry " << config;
@@ -719,8 +809,8 @@ struct TTKernelAnalyzeDFBResourcesPass
         return;
       }
       if (logicalConfigs.count(*logicalIndex)) {
-        module.emitOpError() << "has duplicate logical DFB index "
-                             << *logicalIndex;
+        module.emitOpError()
+            << "has duplicate logical DFB index " << *logicalIndex;
         signalPassFailure();
         return;
       }
@@ -740,6 +830,27 @@ struct TTKernelAnalyzeDFBResourcesPass
     }
 
     const size_t coreCount = static_cast<size_t>(gridX * gridY);
+    SmallVector<uint64_t> l1BudgetsByCore;
+    if (auto budgets =
+            module->getAttrOfType<ArrayAttr>(kPerCoreL1BudgetsAttrName)) {
+      if (budgets.size() != coreCount) {
+        module.emitOpError() << "requires `" << kPerCoreL1BudgetsAttrName
+                             << "` to contain " << coreCount << " entries";
+        signalPassFailure();
+        return;
+      }
+      l1BudgetsByCore.reserve(coreCount);
+      for (Attribute value : budgets) {
+        auto budget = dyn_cast<IntegerAttr>(value);
+        if (!budget || budget.getInt() < 0) {
+          module.emitOpError()
+              << "has malformed `" << kPerCoreL1BudgetsAttrName << "`";
+          signalPassFailure();
+          return;
+        }
+        l1BudgetsByCore.push_back(static_cast<uint64_t>(budget.getInt()));
+      }
+    }
     SmallVector<llvm::SmallDenseSet<int64_t, 8>> logicalsByCore(coreCount);
     bool walkFailed = false;
     for (func::FuncOp func : module.getOps<func::FuncOp>()) {
@@ -761,17 +872,16 @@ struct TTKernelAnalyzeDFBResourcesPass
         }
         auto config = logicalConfigs.find(logicalIndex.getInt());
         if (config == logicalConfigs.end()) {
-          argOp.emitOpError() << "references logical DFB "
-                              << logicalIndex.getInt() << " absent from `"
-                              << kLogicalConfigsAttrName << "`";
+          argOp.emitOpError()
+              << "references logical DFB " << logicalIndex.getInt()
+              << " absent from `" << kLogicalConfigsAttrName << "`";
           return WalkResult::interrupt();
         }
         if (static_cast<int64_t>(argOp.getArgIndex()) !=
             config->second.physicalIndex) {
-          argOp.emitOpError()
-              << "reads physical DFB " << argOp.getArgIndex()
-              << " but logical DFB " << logicalIndex.getInt() << " maps to "
-              << config->second.physicalIndex;
+          argOp.emitOpError() << "reads physical DFB " << argOp.getArgIndex()
+                              << " but logical DFB " << logicalIndex.getInt()
+                              << " maps to " << config->second.physicalIndex;
           return WalkResult::interrupt();
         }
         usedLogicals.insert(logicalIndex.getInt());
@@ -831,15 +941,13 @@ struct TTKernelAnalyzeDFBResourcesPass
       signalPassFailure();
       return;
     }
-
     std::map<int64_t, int64_t> pinnedLogicalByPhysical;
     for (int64_t physicalIndex : pinnedPhysicalIndices) {
       for (const auto &[logicalIndex, logical] : logicalConfigs) {
         if (logical.physicalIndex != physicalIndex) {
           continue;
         }
-        if (!pinnedLogicalByPhysical
-                 .try_emplace(physicalIndex, logicalIndex)
+        if (!pinnedLogicalByPhysical.try_emplace(physicalIndex, logicalIndex)
                  .second) {
           module.emitOpError()
               << "preserved physical DFB " << physicalIndex
@@ -852,19 +960,32 @@ struct TTKernelAnalyzeDFBResourcesPass
       }
       if (pinnedLogicalByPhysical.find(physicalIndex) ==
           pinnedLogicalByPhysical.end()) {
-        module.emitOpError() << "preserves unknown physical DFB "
-                             << physicalIndex;
+        module.emitOpError()
+            << "preserves unknown physical DFB " << physicalIndex;
         signalPassFailure();
         return;
       }
     }
 
     EpochRemapPlan remapPlan;
-    if (!resetCalls.empty() &&
-        module->hasAttr(kEpochPhysicalConfigsAttrName)) {
+    if (!resetCalls.empty() && module->hasAttr(kEpochPhysicalConfigsAttrName)) {
       remapPlan = buildEpochRemapPlan(logicalConfigs, logicalsByCore,
-                                      pinnedPhysicalIndices,
-                                      pinnedLiveEpochs);
+                                      pinnedPhysicalIndices, pinnedLiveEpochs,
+                                      l1BudgetsByCore);
+    }
+    if (!l1BudgetsByCore.empty() &&
+        remapPlan.epochLowerBoundsByCore.size() == coreCount) {
+      for (size_t core = 0; core < coreCount; ++core) {
+        if (remapPlan.epochLowerBoundsByCore[core] <= l1BudgetsByCore[core]) {
+          continue;
+        }
+        module.emitWarning()
+            << "DFB epoch lower bound "
+            << remapPlan.epochLowerBoundsByCore[core]
+            << " exceeds per-core L1 budget " << l1BudgetsByCore[core]
+            << " on core (" << core % static_cast<size_t>(gridX) << ", "
+            << core / static_cast<size_t>(gridX) << ")";
+      }
     }
     if (!remapPlan.oldSlotByPhysical.empty()) {
       for (ttk::OpaqueCallOp call : resetCalls) {
@@ -874,9 +995,8 @@ struct TTKernelAnalyzeDFBResourcesPass
                             ? dyn_cast<IntegerAttr>(oldArgs[0])
                             : IntegerAttr();
         if (!epoch || !oldCount || oldCount.getInt() < 0 ||
-            oldArgs.size() !=
-                1 + static_cast<size_t>(oldCount.getInt()) *
-                        kResetConfigWords) {
+            oldArgs.size() != 1 + static_cast<size_t>(oldCount.getInt()) *
+                                      kResetConfigWords) {
           call.emitOpError()
               << "has malformed reset metadata before DFB epoch packing";
           signalPassFailure();
@@ -943,8 +1063,7 @@ struct TTKernelAnalyzeDFBResourcesPass
       int64_t finalSlotCount = 0;
       for (const auto &[logicalIndex, logical] : logicalConfigs) {
         (void)logicalIndex;
-        finalSlotCount =
-            std::max(finalSlotCount, logical.physicalIndex + 1);
+        finalSlotCount = std::max(finalSlotCount, logical.physicalIndex + 1);
       }
       OpBuilder builder(module.getContext());
       for (func::FuncOp func : module.getOps<func::FuncOp>()) {
@@ -967,14 +1086,13 @@ struct TTKernelAnalyzeDFBResourcesPass
       });
 
       for (func::FuncOp func : module.getOps<func::FuncOp>()) {
-        auto thread = func->getAttrOfType<ttk::ThreadTypeAttr>(
-            ttk::ThreadTypeAttr::name);
+        auto thread =
+            func->getAttrOfType<ttk::ThreadTypeAttr>(ttk::ThreadTypeAttr::name);
         if (!thread || thread.getValue() != ttk::ThreadType::Compute) {
           continue;
         }
-        auto originalUnpackIndices =
-            func->getAttrOfType<DenseI32ArrayAttr>(
-                kKernelUnpackToDestFp32AttrName);
+        auto originalUnpackIndices = func->getAttrOfType<DenseI32ArrayAttr>(
+            kKernelUnpackToDestFp32AttrName);
         llvm::SmallDenseSet<int64_t, 8> originalUnpackSet;
         if (originalUnpackIndices) {
           for (int32_t index : originalUnpackIndices.asArrayRef()) {
@@ -1004,9 +1122,9 @@ struct TTKernelAnalyzeDFBResourcesPass
         SmallVector<int32_t> sortedUnpackIndices(unpackIndices.begin(),
                                                  unpackIndices.end());
         llvm::sort(sortedUnpackIndices);
-        func->setAttr(kKernelUnpackToDestFp32AttrName,
-                      DenseI32ArrayAttr::get(module.getContext(),
-                                             sortedUnpackIndices));
+        func->setAttr(
+            kKernelUnpackToDestFp32AttrName,
+            DenseI32ArrayAttr::get(module.getContext(), sortedUnpackIndices));
       }
 
       SmallVector<Attribute> remappedConfigs;
@@ -1016,9 +1134,9 @@ struct TTKernelAnalyzeDFBResourcesPass
         int64_t logicalIndex =
             config.getAs<IntegerAttr>("logical_index").getInt();
         NamedAttrList fields(config.getValue());
-        fields.set("physical_index", builder.getI64IntegerAttr(
-                                         logicalConfigs[logicalIndex]
-                                             .physicalIndex));
+        fields.set("physical_index",
+                   builder.getI64IntegerAttr(
+                       logicalConfigs[logicalIndex].physicalIndex));
         remappedConfigs.push_back(fields.getDictionary(module.getContext()));
       }
       configsAttr = builder.getArrayAttr(remappedConfigs);
@@ -1031,8 +1149,8 @@ struct TTKernelAnalyzeDFBResourcesPass
           if (logical.physicalIndex != logicalIndex) {
             indexMapEntries.push_back(DictionaryAttr::get(
                 module.getContext(),
-                {builder.getNamedAttr(
-                     "old_index", builder.getI32IntegerAttr(logicalIndex)),
+                {builder.getNamedAttr("old_index",
+                                      builder.getI32IntegerAttr(logicalIndex)),
                  builder.getNamedAttr(
                      "new_index",
                      builder.getI32IntegerAttr(logical.physicalIndex))}));
@@ -1065,16 +1183,14 @@ struct TTKernelAnalyzeDFBResourcesPass
       for (const auto &[physicalIndex, logical] : compilerByPhysical) {
         compilerEntries.push_back(DictionaryAttr::get(
             module.getContext(),
-            {builder.getNamedAttr(
-                 "dfb_index", builder.getI32IntegerAttr(physicalIndex)),
-             builder.getNamedAttr(
-                 "num_tiles",
-                 builder.getI32IntegerAttr(logical->elemsPerBlock)),
+            {builder.getNamedAttr("dfb_index",
+                                  builder.getI32IntegerAttr(physicalIndex)),
+             builder.getNamedAttr("num_tiles", builder.getI32IntegerAttr(
+                                                   logical->elemsPerBlock)),
              builder.getNamedAttr("element_type",
                                   TypeAttr::get(logical->elementType)),
-             builder.getNamedAttr(
-                 "block_count",
-                 builder.getI32IntegerAttr(logical->blockCount))}));
+             builder.getNamedAttr("block_count", builder.getI32IntegerAttr(
+                                                     logical->blockCount))}));
       }
       if (compilerEntries.empty()) {
         module->removeAttr(kCompilerAllocatedDFBsAttrName);
@@ -1088,8 +1204,7 @@ struct TTKernelAnalyzeDFBResourcesPass
           remappedPinnedLiveEpochs;
       std::map<int64_t, int64_t> remappedPinnedLogicalByPhysical;
       for (int64_t oldPhysicalIndex : pinnedPhysicalIndices) {
-        int64_t newPhysicalIndex =
-            remapPlan.physicalIndex(0, oldPhysicalIndex);
+        int64_t newPhysicalIndex = remapPlan.physicalIndex(0, oldPhysicalIndex);
         remappedPinnedPhysicalIndices.insert(newPhysicalIndex);
         remappedPinnedLiveEpochs[newPhysicalIndex] =
             pinnedLiveEpochs.at(oldPhysicalIndex);
@@ -1098,8 +1213,7 @@ struct TTKernelAnalyzeDFBResourcesPass
       }
       pinnedPhysicalIndices = std::move(remappedPinnedPhysicalIndices);
       pinnedLiveEpochs = std::move(remappedPinnedLiveEpochs);
-      pinnedLogicalByPhysical =
-          std::move(remappedPinnedLogicalByPhysical);
+      pinnedLogicalByPhysical = std::move(remappedPinnedLogicalByPhysical);
     }
 
     llvm::MapVector<int64_t, PhysicalInfo> physicalInfos;
@@ -1115,9 +1229,8 @@ struct TTKernelAnalyzeDFBResourcesPass
       }
       if (logical.epoch == physical.initialEpoch &&
           logical.pageBytes != physical.initialPageBytes) {
-        module.emitOpError()
-            << "physical DFB " << logical.physicalIndex
-            << " has incompatible page sizes in initial epoch";
+        module.emitOpError() << "physical DFB " << logical.physicalIndex
+                             << " has incompatible page sizes in initial epoch";
         signalPassFailure();
         return;
       }
@@ -1137,8 +1250,7 @@ struct TTKernelAnalyzeDFBResourcesPass
         (void)physical;
         physicalCount = std::max(physicalCount, physicalIndex + 1);
       }
-      SmallVector<const LogicalConfig *> initialConfigs(physicalCount,
-                                                        nullptr);
+      SmallVector<const LogicalConfig *> initialConfigs(physicalCount, nullptr);
       SmallVector<uint64_t> maxBytes(physicalCount, 0);
       llvm::SmallDenseSet<int64_t, 8> activeLogicals;
       for (const auto &coreLogicals : logicalsByCore) {
@@ -1147,9 +1259,8 @@ struct TTKernelAnalyzeDFBResourcesPass
       for (const auto &[logicalIndex, logical] : logicalConfigs) {
         const size_t physical = static_cast<size_t>(logical.physicalIndex);
         const LogicalConfig *initial = initialConfigs[physical];
-        if (!initial ||
-            std::tie(logical.epoch, logical.logicalIndex) <
-                std::tie(initial->epoch, initial->logicalIndex)) {
+        if (!initial || std::tie(logical.epoch, logical.logicalIndex) <
+                            std::tie(initial->epoch, initial->logicalIndex)) {
           initialConfigs[physical] = &logical;
         }
         if (logical.scope == AddressScope::Legacy ||
@@ -1163,9 +1274,9 @@ struct TTKernelAnalyzeDFBResourcesPass
       physicalConfigs.reserve(static_cast<size_t>(physicalCount));
       for (int64_t physical = 0; physical < physicalCount; ++physical) {
         const LogicalConfig *initial = initialConfigs[physical];
-        auto tileType =
-            initial ? dyn_cast<ttcore::TileType>(initial->elementType)
-                    : ttcore::TileType();
+        auto tileType = initial
+                            ? dyn_cast<ttcore::TileType>(initial->elementType)
+                            : ttcore::TileType();
         if (!initial || !tileType) {
           module.emitOpError()
               << "epoch DFB packing produced a sparse or non-tile slot "
@@ -1173,15 +1284,15 @@ struct TTKernelAnalyzeDFBResourcesPass
           signalPassFailure();
           return;
         }
-        const uint64_t totalSize = roundUpTo(
-            std::max(maxBytes[physical], initial->pageBytes),
-            initial->pageBytes);
+        const uint64_t totalSize =
+            roundUpTo(std::max(maxBytes[physical], initial->pageBytes),
+                      initial->pageBytes);
         physicalConfigs.push_back(DictionaryAttr::get(
             module.getContext(),
             {physicalBuilder.getNamedAttr(
                  "dfb_index", physicalBuilder.getI32IntegerAttr(physical)),
-             physicalBuilder.getNamedAttr(
-                 "element_type", TypeAttr::get(initial->elementType)),
+             physicalBuilder.getNamedAttr("element_type",
+                                          TypeAttr::get(initial->elementType)),
              physicalBuilder.getNamedAttr(
                  "tile_height",
                  physicalBuilder.getI32IntegerAttr(tileType.getHeight())),
@@ -1189,9 +1300,8 @@ struct TTKernelAnalyzeDFBResourcesPass
                  "tile_width",
                  physicalBuilder.getI32IntegerAttr(tileType.getWidth())),
              physicalBuilder.getNamedAttr(
-                 "total_size",
-                 physicalBuilder.getI64IntegerAttr(
-                     static_cast<int64_t>(totalSize)))}));
+                 "total_size", physicalBuilder.getI64IntegerAttr(
+                                   static_cast<int64_t>(totalSize)))}));
       }
       module->setAttr(kEpochPhysicalConfigsAttrName,
                       physicalBuilder.getArrayAttr(physicalConfigs));
@@ -1201,8 +1311,8 @@ struct TTKernelAnalyzeDFBResourcesPass
     for (size_t core = 0; core < coreCount; ++core) {
       for (int64_t logicalIndex : logicalsByCore[core]) {
         const LogicalConfig &logical = logicalConfigs[logicalIndex];
-        uint64_t bytes = static_cast<uint64_t>(logical.numPages) *
-                         logical.pageBytes;
+        uint64_t bytes =
+            static_cast<uint64_t>(logical.numPages) * logical.pageBytes;
         uint64_t &current = bytesByCore[core][logical.physicalIndex];
         current = std::max(current, bytes);
       }
@@ -1213,8 +1323,8 @@ struct TTKernelAnalyzeDFBResourcesPass
       if (logical.scope != AddressScope::Legacy) {
         continue;
       }
-      uint64_t bytes = static_cast<uint64_t>(logical.numPages) *
-                       logical.pageBytes;
+      uint64_t bytes =
+          static_cast<uint64_t>(logical.numPages) * logical.pageBytes;
       for (auto &core : bytesByCore) {
         uint64_t &current = core[logical.physicalIndex];
         current = std::max(current, bytes);
@@ -1226,9 +1336,9 @@ struct TTKernelAnalyzeDFBResourcesPass
       for (auto [physicalIndex, bytes] : bytesByCore[core]) {
         const PhysicalInfo &physical = physicalInfos[physicalIndex];
         uint64_t pages =
-            (bytes + physical.initialPageBytes - 1) /
-            physical.initialPageBytes;
-        if (pages > static_cast<uint64_t>(std::numeric_limits<int32_t>::max())) {
+            (bytes + physical.initialPageBytes - 1) / physical.initialPageBytes;
+        if (pages >
+            static_cast<uint64_t>(std::numeric_limits<int32_t>::max())) {
           module.emitOpError() << "physical DFB " << physicalIndex
                                << " capacity exceeds i32 page count";
           signalPassFailure();
@@ -1240,8 +1350,7 @@ struct TTKernelAnalyzeDFBResourcesPass
     }
 
     llvm::MapVector<int64_t, LogicalConfig> pinnedConfigs;
-    for (const auto &[physicalIndex, logicalIndex] :
-         pinnedLogicalByPhysical) {
+    for (const auto &[physicalIndex, logicalIndex] : pinnedLogicalByPhysical) {
       auto pinned = logicalConfigs.find(logicalIndex);
       assert(pinned != logicalConfigs.end() &&
              "preserved logical DFB was validated before packing");
@@ -1250,8 +1359,7 @@ struct TTKernelAnalyzeDFBResourcesPass
       pinnedConfigs.insert({physicalIndex, pinned->second});
     }
 
-    auto getEpochConfigs =
-        [&](size_t core, int64_t epoch)
+    auto getEpochConfigs = [&](size_t core, int64_t epoch)
         -> FailureOr<std::map<int64_t, EpochPhysicalConfig>> {
       std::map<int64_t, EpochPhysicalConfig> result;
       auto addConfig = [&](const LogicalConfig &logical) -> LogicalResult {
@@ -1259,11 +1367,11 @@ struct TTKernelAnalyzeDFBResourcesPass
             !logicalsByCore[core].contains(logical.logicalIndex)) {
           return success();
         }
-        uint64_t bytes = static_cast<uint64_t>(logical.numPages) *
-                         logical.pageBytes;
-        auto [it, inserted] = result.try_emplace(
-            logical.physicalIndex,
-            EpochPhysicalConfig{bytes, logical.pageBytes});
+        uint64_t bytes =
+            static_cast<uint64_t>(logical.numPages) * logical.pageBytes;
+        auto [it, inserted] =
+            result.try_emplace(logical.physicalIndex,
+                               EpochPhysicalConfig{bytes, logical.pageBytes});
         if (!inserted) {
           if (it->second.pageBytes != logical.pageBytes) {
             module.emitOpError()
@@ -1337,9 +1445,8 @@ struct TTKernelAnalyzeDFBResourcesPass
             return;
           }
           const PhysicalInfo &physical = physicalInfos[physicalIndex];
-          uint64_t capacity =
-              static_cast<uint64_t>(allocation->numPages) *
-              physical.initialPageBytes;
+          uint64_t capacity = static_cast<uint64_t>(allocation->numPages) *
+                              physical.initialPageBytes;
           if (epochConfig.bytes > capacity) {
             call.emitOpError()
                 << "configures physical DFB " << physicalIndex << " for "
@@ -1369,8 +1476,7 @@ struct TTKernelAnalyzeDFBResourcesPass
                           : IntegerAttr();
       if (!oldCount || oldCount.getInt() < 0 ||
           oldArgs.size() !=
-              1 + static_cast<size_t>(oldCount.getInt()) *
-                      kResetConfigWords) {
+              1 + static_cast<size_t>(oldCount.getInt()) * kResetConfigWords) {
         call.emitOpError() << "has malformed reset configuration arguments";
         signalPassFailure();
         return;
@@ -1398,9 +1504,8 @@ struct TTKernelAnalyzeDFBResourcesPass
             config->second.bytes % config->second.pageBytes != 0 ||
             config->second.bytes >
                 static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
-          call.emitOpError()
-              << "cannot specialize physical DFB " << physicalIndex.getInt()
-              << " reset geometry";
+          call.emitOpError() << "cannot specialize physical DFB "
+                             << physicalIndex.getInt() << " reset geometry";
           signalPassFailure();
           return;
         }
@@ -1408,9 +1513,8 @@ struct TTKernelAnalyzeDFBResourcesPass
         newArgs.push_back(oldArgs[base]);
         newArgs.push_back(builder.getI64IntegerAttr(
             static_cast<int64_t>(config->second.bytes)));
-        newArgs.push_back(builder.getI64IntegerAttr(
-            static_cast<int64_t>(config->second.bytes /
-                                 config->second.pageBytes)));
+        newArgs.push_back(builder.getI64IntegerAttr(static_cast<int64_t>(
+            config->second.bytes / config->second.pageBytes)));
         newArgs.append(oldArgs.begin() + base + 3,
                        oldArgs.begin() + base + kResetConfigWords);
       }
@@ -1449,13 +1553,13 @@ struct TTKernelAnalyzeDFBResourcesPass
       for (const PhysicalConfig &config : group.configs) {
         configAttrs.push_back(DictionaryAttr::get(
             module.getContext(),
-            {builder.getNamedAttr("dfb_index", builder.getI32IntegerAttr(
-                                                   config.physicalIndex)),
+            {builder.getNamedAttr(
+                 "dfb_index", builder.getI32IntegerAttr(config.physicalIndex)),
              builder.getNamedAttr("num_pages",
                                   builder.getI32IntegerAttr(config.numPages)),
-             builder.getNamedAttr("address_scope", builder.getStringAttr(
-                                                       stringifyScope(
-                                                           config.scope)))}));
+             builder.getNamedAttr(
+                 "address_scope",
+                 builder.getStringAttr(stringifyScope(config.scope)))}));
       }
       SmallVector<Attribute> coordAttrs;
       coordAttrs.reserve(group.coords.size());
@@ -1464,8 +1568,10 @@ struct TTKernelAnalyzeDFBResourcesPass
       }
       groupAttrs.push_back(DictionaryAttr::get(
           module.getContext(),
-          {builder.getNamedAttr("core_coords", builder.getArrayAttr(coordAttrs)),
-           builder.getNamedAttr("configs", builder.getArrayAttr(configAttrs))}));
+          {builder.getNamedAttr("core_coords",
+                                builder.getArrayAttr(coordAttrs)),
+           builder.getNamedAttr("configs",
+                                builder.getArrayAttr(configAttrs))}));
     }
     module->setAttr(kPerCoreConfigsAttrName, builder.getArrayAttr(groupAttrs));
   }
