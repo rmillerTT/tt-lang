@@ -714,6 +714,19 @@ def test_composition_removes_inactive_factory_boolean_branch():
     assert result.kernels == (KernelKind.COMPUTE,)
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+def test_factory_boolean_specialization_selects_resource_declarations(enabled):
+    """Static branches determine resources before declaration validation."""
+
+    @ttl.operation(grid=(1, 1))
+    def selected_operation():
+        if enabled:
+            scratch = ttl.make_dfb("bf16", shape=(1, 1), block_count=2)
+
+    assert "if " not in selected_operation._spec.source
+    assert ("make_dfb" in selected_operation._spec.source) == enabled
+
+
 def test_factory_boolean_specialization_respects_nested_parameter():
     """Nested parameters shadow same-named factory captures."""
     enabled = False
