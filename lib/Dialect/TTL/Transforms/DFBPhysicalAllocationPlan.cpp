@@ -377,22 +377,6 @@ canReconfigureDescriptorAcrossEpochs(const DFBLogicalLifecycle &lhs,
          haveDisjointConfigurationEpochs(lhs, rhs);
 }
 
-static bool
-requiresReconfigurationStorage(const DFBLogicalLifecycle &logicalDFB) {
-  // The runtime gives changed descriptors hidden tensor backing, which cannot
-  // also provide static storage for a distinct physical descriptor.
-  auto lifetimeRequiresStorage = [](const DFBPerNodeLifetime &lifetime) {
-    return llvm::any_of(lifetime.epochs, [](const DFBLifecycleEpoch &epoch) {
-      return llvm::any_of(getDescriptorInstallationEpochs(epoch),
-                          [](std::optional<int64_t> configurationEpoch) {
-                            return configurationEpoch.has_value();
-                          });
-    });
-  };
-  return llvm::any_of(logicalDFB.nodeLifetimes, lifetimeRequiresStorage) ||
-         llvm::any_of(logicalDFB.possibleNodeLifetimes,
-                      lifetimeRequiresStorage);
-}
 } // namespace
 
 struct DFBPairConflictRequirements {
@@ -580,10 +564,10 @@ private:
       }
       return;
     }
-    if (requirements.allowEpochSeparatedScratchStorage &&
-        !lhs.tensorBacking && !rhs.tensorBacking &&
-        lhs.accessCompletionProven && rhs.accessCompletionProven &&
-        lhs.lifecycleCompletionProven && rhs.lifecycleCompletionProven &&
+    if (requirements.allowEpochSeparatedScratchStorage && !lhs.tensorBacking &&
+        !rhs.tensorBacking && lhs.accessCompletionProven &&
+        rhs.accessCompletionProven && lhs.lifecycleCompletionProven &&
+        rhs.lifecycleCompletionProven &&
         haveDisjointConfigurationEpochs(lhs, rhs)) {
       return;
     }

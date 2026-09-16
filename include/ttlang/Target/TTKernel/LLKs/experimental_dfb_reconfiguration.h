@@ -173,10 +173,9 @@ FORCE_INLINE void applyMask(uint32_t tt_l1_ptr *configuration,
           configuration[configurationOffset + 3] >> cb_addr_shift;
 
       LocalCBInterface &interface = get_local_cb_interface(dfbIndex);
-      uint32_t fifoAddress =
-          configuredAddress == preserveFifoAddress
-              ? interface.fifo_limit - interface.fifo_size
-              : configuredAddress >> cb_addr_shift;
+      uint32_t fifoAddress = configuredAddress == preserveFifoAddress
+                                 ? interface.fifo_limit - interface.fifo_size
+                                 : configuredAddress >> cb_addr_shift;
       if constexpr (updateReadPointer) {
         interface.fifo_rd_ptr = fifoAddress;
       }

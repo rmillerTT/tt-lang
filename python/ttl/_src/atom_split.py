@@ -295,9 +295,7 @@ class _KernelSelectorResolver:
             if not isinstance(values, ast.List) or (
                 not allow_empty_lists and not values.elts
             ):
-                list_requirement = (
-                    "a list" if allow_empty_lists else "a nonempty list"
-                )
+                list_requirement = "a list" if allow_empty_lists else "a nonempty list"
                 raise _split_error(
                     values,
                     f"each call_extern_func kernel-specific {keyword_name} value "
@@ -325,9 +323,7 @@ class _KernelSelectorResolver:
             )
             if selected_values is None:
                 call.keywords = [
-                    keyword
-                    for keyword in call.keywords
-                    if keyword.arg != keyword_name
+                    keyword for keyword in call.keywords if keyword.arg != keyword_name
                 ]
                 continue
             for keyword in call.keywords:
@@ -725,9 +721,7 @@ def split_function_body(
         target_capacities=target_capacities,
     )
     bodies = {
-        kernel: _apply_split_plan(
-            fn_def.body, kernel, plan, selector_resolver
-        )
+        kernel: _apply_split_plan(fn_def.body, kernel, plan, selector_resolver)
         for kernel in ordered_kernels
     }
     return SplitResult(

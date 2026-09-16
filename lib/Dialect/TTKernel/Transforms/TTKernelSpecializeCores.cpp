@@ -11,8 +11,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "ttlang/Analysis/ValueOriginAnalysis.h"
 #include "ttlang/Analysis/IntegerExpressionEvaluator.h"
+#include "ttlang/Analysis/ValueOriginAnalysis.h"
 #include "ttlang/Dialect/TTKernel/IR/TTKernel.h"
 #include "ttlang/Dialect/TTKernel/IR/TTKernelOps.h"
 #include "ttlang/Dialect/TTL/IR/TTL.h"

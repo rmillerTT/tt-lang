@@ -3456,12 +3456,9 @@ def _order_static_dfb_descriptor_plans(
             f"exceeds the L1 budget by {required_bytes - available_bytes} bytes"
         )
 
-    if (
-        current_score[0] > 0
-        and (
-            not search_unsplit_orders
-            or len(static_plan_indices) > _STATIC_DFB_PACKING_EXACT_PLAN_LIMIT
-        )
+    if current_score[0] > 0 and (
+        not search_unsplit_orders
+        or len(static_plan_indices) > _STATIC_DFB_PACKING_EXACT_PLAN_LIMIT
     ):
         return split_overflow_core_or_raise(current_result, current_order)
 
@@ -3670,9 +3667,7 @@ def _shared_static_storage_size(
 
 def _static_storage_bytes_by_core(
     cb_configs: Sequence[PhysicalDFBConfig],
-    static_members_by_storage_by_core: Dict[
-        int, Dict[Tuple[int, int], set[int]]
-    ],
+    static_members_by_storage_by_core: Dict[int, Dict[Tuple[int, int], set[int]]],
     reconfiguration_plan: Optional[DFBReconfigurationPlan],
 ) -> Dict[int, Dict[Tuple[int, int], int]]:
     """Return each compiler-managed storage allocation's required capacity."""
