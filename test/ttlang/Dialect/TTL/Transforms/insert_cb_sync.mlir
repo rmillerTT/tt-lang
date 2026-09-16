@@ -1527,6 +1527,7 @@ func.func @early_consumer_release_before_read(
 // CHECK-NEXT: ttl.cb_reserve %[[DFB]]
 // CHECK-NEXT: ttl.opaque_call "fill_later_slot"
 // CHECK-NEXT: ttl.cb_push %[[DFB]]
+// CHECK-NEXT: ttl.store
 // CHECK: return
 func.func @nested_later_acquire_owns_direct_access(
     %value: tensor<1x1x!ttcore.tile<32x32, bf16>>)
@@ -1542,6 +1543,7 @@ func.func @nested_later_acquire_owns_direct_access(
       ttl.opaque_call "fill_later_slot" dfb_dependencies(%dfb : !ttl.cb<[1, 1], !ttcore.tile<32x32, bf16>, 2>) () {header = "fill.hpp"} : () -> ()
       ttl.cb_push %dfb : <[1, 1], !ttcore.tile<32x32, bf16>, 2>
     }
+    ttl.store %value, %first_reserved : tensor<1x1x!ttcore.tile<32x32, bf16>>, tensor<1x1x!ttcore.tile<32x32, bf16>>
   }
   func.return
 }
