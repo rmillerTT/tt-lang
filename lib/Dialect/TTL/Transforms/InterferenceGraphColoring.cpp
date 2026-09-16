@@ -402,10 +402,9 @@ public:
 
   ExactInterferenceGraphWeightColoring solve() {
     bool searchLimitReached =
-        bestWeight != 0 &&
-        assign(/*assignedCount=*/0, /*usedColorCount=*/0,
-               /*currentWeight=*/0) ==
-            FixedColorCountSearchStatus::SearchLimitReached;
+        bestWeight != 0 && assign(/*assignedCount=*/0, /*usedColorCount=*/0,
+                                  /*currentWeight=*/0) ==
+                               FixedColorCountSearchStatus::SearchLimitReached;
     if (!searchLimitReached && !foundRepresentableWeight &&
         !initialWeightRepresentable) {
       return {ExactInterferenceGraphWeightStatus::AllocationWeightOverflow,

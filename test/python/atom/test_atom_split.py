@@ -775,9 +775,7 @@ def test_composition_expands_captured_sequence_loop(coordinates):
     def coordinate_helper(core_x, core_y):
         selected = False
         for coordinate_x, coordinate_y in coordinates:
-            selected = selected or (
-                core_x == coordinate_x and core_y == coordinate_y
-            )
+            selected = selected or (core_x == coordinate_x and core_y == coordinate_y)
         if selected:
             ttl.call_extern_func(
                 "selected.hpp",
@@ -2149,9 +2147,7 @@ def test_composed_reset_uses_canonical_kernel_selectors():
 def test_synchronized_dfb_reset_requires_complete_distinct_participants():
     """A reset names one compute kernel and both data-movement kernels."""
     with pytest.raises(ValueError, match="one compute kernel and two data movement"):
-        ttl.DFBReset(
-            participants=(KernelKind.COMPUTE, KernelKind.DATA_MOVEMENT)
-        )
+        ttl.DFBReset(participants=(KernelKind.COMPUTE, KernelKind.DATA_MOVEMENT))
     with pytest.raises(ValueError, match="participants must be distinct"):
         ttl.DFBReset(
             participants=(
@@ -3597,9 +3593,7 @@ def test_external_call_selects_kernel_specific_dfb_effects():
         ),
     ],
 )
-def test_external_call_rejects_invalid_kernel_specific_lists(
-    keyword, value, message
-):
+def test_external_call_rejects_invalid_kernel_specific_lists(keyword, value, message):
     fn = _fn(
         f"""
         def k(source):
@@ -3634,9 +3628,7 @@ def test_external_call_rejects_invalid_kernel_specific_lists(
         ),
     ],
 )
-def test_external_call_rejects_invalid_kernel_specific_dfb_effects(
-    effects, message
-):
+def test_external_call_rejects_invalid_kernel_specific_dfb_effects(effects, message):
     fn = _fn(
         f"""
         def k(source):

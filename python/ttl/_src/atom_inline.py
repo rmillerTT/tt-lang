@@ -187,9 +187,7 @@ class _SubstituteTransformer(ast.NodeTransformer):
                 self.inline_suffix,
             )
             for statement in transformed_node.body:
-                transformed_statement = loop_transformer.visit(
-                    copy.deepcopy(statement)
-                )
+                transformed_statement = loop_transformer.visit(copy.deepcopy(statement))
                 if isinstance(transformed_statement, list):
                     unrolled_body.extend(transformed_statement)
                 else:

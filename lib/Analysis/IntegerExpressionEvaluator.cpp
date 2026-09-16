@@ -34,6 +34,17 @@ struct EvaluationTask {
   Value replacement;
 };
 
+using EvaluationCache = llvm::DenseMap<Value, std::optional<llvm::APInt>>;
+
+// Copy before insertion because cache growth invalidates entry references.
+static void cacheReplacementValue(EvaluationCache &cache, Value value,
+                                  Value replacement) {
+  auto replacementIt = cache.find(replacement);
+  std::optional<llvm::APInt> replacementValue =
+      replacementIt == cache.end() ? std::nullopt : replacementIt->second;
+  cache.try_emplace(value, std::move(replacementValue));
+}
+
 /// Return the scalar bit width used to evaluate an integer or index value.
 std::optional<std::uint32_t> getIntegerBitWidth(Type type) {
   if (auto integerType = dyn_cast<IntegerType>(type)) {
@@ -127,10 +138,7 @@ IntegerExpressionEvaluator::evaluate(Value requestedValue) {
 
     if (task.kind == EvaluationTaskKind::ResolveReplacement) {
       activeValues.erase(task.value);
-      auto replacement = cache.find(task.replacement);
-      cache.try_emplace(task.value, replacement != cache.end()
-                                        ? replacement->second
-                                        : std::nullopt);
+      cacheReplacementValue(cache, task.value, task.replacement);
       continue;
     }
 
@@ -153,7 +161,7 @@ IntegerExpressionEvaluator::evaluate(Value requestedValue) {
       auto cachedReplacement = cache.find(replacement);
       if (cachedReplacement != cache.end()) {
         activeValues.erase(task.value);
-        cache.try_emplace(task.value, cachedReplacement->second);
+        cacheReplacementValue(cache, task.value, replacement);
         continue;
       }
       worklist.push_back(
@@ -272,7 +280,7 @@ IntegerExpressionEvaluator::evaluate(Value requestedValue) {
       auto cachedReplacement = cache.find(replacement);
       if (cachedReplacement != cache.end()) {
         activeValues.erase(task.value);
-        cache.try_emplace(task.value, cachedReplacement->second);
+        cacheReplacementValue(cache, task.value, replacement);
         break;
       }
       worklist.push_back(

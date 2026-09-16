@@ -529,27 +529,6 @@ static bool executesRegionsAtMostOnce(Operation *operation) {
              scf::ExecuteRegionOp, IfSrcOp, IfDstOp>(operation);
 }
 
-static AccessDomain refineUnknownAccessDomainFromExecutionCounts(
-    Operation *operation, AccessDomain accessDomain,
-    const LaunchNodeDomainState &domainState) {
-  if (accessDomain.domain.known) {
-    return accessDomain;
-  }
-
-  LaunchNodeDomain exactDomain;
-  for (LaunchNodeCoord node : domainState.baseDomain.nodes) {
-    std::optional<std::uint64_t> executionCount =
-        getExactExecutionCountAtLaunchNode(operation, node, domainState);
-    if (!executionCount) {
-      return accessDomain;
-    }
-    if (*executionCount > 0) {
-      exactDomain.nodes.insert(node);
-    }
-  }
-  return {std::move(exactDomain), nullptr};
-}
-
 // Computes a static execution-count upper bound inside a single-block function
 // and nested single-block affine/scf loops or at-most-once regions. CFGs, other
 // region operations, and loops without positive static trip counts have no

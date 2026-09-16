@@ -344,7 +344,7 @@ struct TTLVerifyDFBSPSCPass
       return;
     }
 
-    if (isDFBProtocolDomainVerificationRelaxed()) {
+    if (applyDFBProtocolDomainVerificationRelaxation(module)) {
       return;
     }
 

@@ -76,7 +76,8 @@ def test_storage_indices_are_preserved():
 
 def test_reconfiguration_epochs_inherit_physical_storage_index():
     with Context():
-        module = Module.parse("""module attributes {
+        module = Module.parse(
+            """module attributes {
               ttl.dfb_allocations = [{
                 block_count = 1 : i32,
                 dfb_index = 0 : i32,
@@ -103,7 +104,8 @@ def test_reconfiguration_epochs_inherit_physical_storage_index():
                   dfb_index = 0 : i32
                 }]
               }
-            } {}""")
+            } {}"""
+        )
         physical_configs = _resolve_dfb_configs(module)
         plan = _extract_dfb_reconfiguration_plan(module, physical_configs)
 
@@ -113,7 +115,8 @@ def test_reconfiguration_epochs_inherit_physical_storage_index():
 
 def test_tensor_backing_segments_preserve_nodes_and_tensor_range():
     with Context():
-        module = Module.parse("""module attributes {ttl.dfb_allocations = [{
+        module = Module.parse(
+            """module attributes {ttl.dfb_allocations = [{
               block_count = 1 : i32,
               dfb_index = 0 : i32,
               element_type = !ttcore.tile<32x32, bf16>,
@@ -124,7 +127,8 @@ def test_tensor_backing_segments_preserve_nodes_and_tensor_range():
                   tensor_index = 2, byte_offset = 2048, byte_size = 2048>,
                 nodes = [[1, 0], [0, 0]]
               }]
-            }]} {}""")
+            }]} {}"""
+        )
 
         assert _resolve_dfb_configs(module) == [
             PhysicalDFBConfig(

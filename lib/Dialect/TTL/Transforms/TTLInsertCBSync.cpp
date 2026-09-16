@@ -146,12 +146,10 @@ static bool isBeforeLocalKindBoundary(Operation *operation,
   return projected && projected->isBeforeInBlock(localKindBoundary);
 }
 
-static bool updateLocalSlotValuesAndTestUse(DFBAcquireInterval interval,
-                                            Operation *operation,
-                                            DenseSet<Value> &slotValues,
-                                            Operation *localKindBoundary,
-                                            ArrayRef<Operation *> acquires,
-                                            const DominanceInfo &dominanceInfo) {
+static bool updateLocalSlotValuesAndTestUse(
+    DFBAcquireInterval interval, Operation *operation,
+    DenseSet<Value> &slotValues, Operation *localKindBoundary,
+    ArrayRef<Operation *> acquires, const DominanceInfo &dominanceInfo) {
   bool usesSlot = false;
   for (Value operand : operation->getOperands()) {
     if (slotValues.contains(operand)) {
@@ -181,7 +179,7 @@ static bool updateLocalSlotValuesAndTestUse(DFBAcquireInterval interval,
         return otherAcquire != interval.acquire &&
                getDFBAcquireDFB(otherAcquire) == interval.dfb &&
                dominanceInfo.properlyDominates(interval.acquire,
-                                                otherAcquire) &&
+                                               otherAcquire) &&
                dominanceInfo.properlyDominates(otherAcquire, operation);
       })) {
     return false;
@@ -200,9 +198,9 @@ static bool nestedRegionMayUseLocalSlot(DFBAcquireInterval interval,
     if (nested == operation) {
       return;
     }
-    foundUse |= updateLocalSlotValuesAndTestUse(
-        interval, nested, slotValues, localKindBoundary, acquires,
-        dominanceInfo);
+    foundUse |= updateLocalSlotValuesAndTestUse(interval, nested, slotValues,
+                                                localKindBoundary, acquires,
+                                                dominanceInfo);
   });
   return foundUse;
 }
@@ -222,8 +220,7 @@ static bool operationMayUseLocalSlot(DFBAcquireInterval interval,
     return true;
   }
   if (nestedRegionMayUseLocalSlot(interval, operation, slotValues,
-                                  localKindBoundary, acquires,
-                                  dominanceInfo)) {
+                                  localKindBoundary, acquires, dominanceInfo)) {
     for (Value result : operation->getResults()) {
       slotValues.insert(result);
     }
@@ -474,8 +471,7 @@ static PlanningResult<GuardedLocalReleaseInfo> analyzeGuardedLocalReleases(
       continue;
     }
     if (operationMayUseLocalSlot(interval, &operation, slotValues,
-                                 localKindBoundary, acquires,
-                                 dominanceInfo)) {
+                                 localKindBoundary, acquires, dominanceInfo)) {
       info.lastLocalUse = &operation;
     }
   }
