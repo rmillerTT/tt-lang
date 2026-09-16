@@ -311,12 +311,6 @@ _external_bf16_composition = _make_external_composition_kernel("bf16", False)
 _external_f32_composition = _make_external_composition_kernel("float32", False)
 _tensor_backed_bf16_composition = _make_external_composition_kernel("bf16", True)
 _tensor_backed_f32_composition = _make_external_composition_kernel("float32", True)
-_conditional_external_bf16_reconfiguration = (
-    _make_conditional_external_reconfiguration_kernel("bf16")
-)
-_conditional_external_f32_reconfiguration = (
-    _make_conditional_external_reconfiguration_kernel("float32")
-)
 
 assert EXTERNAL_COMPOSITION_LOGICAL_DFBS > 64
 
@@ -379,16 +373,16 @@ def test_external_protocol_state_reset_drains_compute_interfaces(
 
 
 @pytest.mark.parametrize(
-    ("operation", "dtype"),
+    ("data_format", "dtype"),
     [
-        (_conditional_external_bf16_reconfiguration, torch.bfloat16),
-        (_conditional_external_f32_reconfiguration, torch.float32),
+        ("bf16", torch.bfloat16),
+        ("float32", torch.float32),
     ],
     ids=["bf16", "f32"],
 )
 @pytest.mark.parametrize("to_device", [to_dram, to_l1], ids=["dram", "l1"])
 def test_conditional_external_dfb_reuse_across_reconfiguration(
-    device, operation, dtype, to_device, monkeypatch, tmp_path
+    device, data_format, dtype, to_device, monkeypatch, tmp_path
 ):
     if ttl_api._detect_device_arch(device) != "blackhole":
         pytest.skip("requires Blackhole DFB reconfiguration support")
@@ -401,6 +395,7 @@ def test_conditional_external_dfb_reuse_across_reconfiguration(
     final_mlir_path = tmp_path / "conditional_external_reconfiguration.mlir"
     monkeypatch.setenv("TTLANG_FINAL_MLIR", str(final_mlir_path))
 
+    operation = _make_conditional_external_reconfiguration_kernel(data_format)
     operation(source, result)
 
     # Negating the node predicate keeps each external access domain exact, so
