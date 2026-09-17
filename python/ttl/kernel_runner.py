@@ -2170,7 +2170,12 @@ def _same_device(lhs: Any, rhs: Any) -> bool:
 
 
 def _allocate_l1_sharded_storage_tensor(
-    core_ranges: Any, num_bytes: int, device: Any, *, zero_initialize: bool = False
+    core_ranges: Any,
+    num_bytes: int,
+    device: Any,
+    *,
+    zero_initialize: bool = False,
+    per_core: bool = False,
 ):
     """Allocate row-major L1 storage with one 4-byte element per storage word."""
     aligned_bytes = _align_up(num_bytes, 32)
@@ -2186,6 +2191,8 @@ def _allocate_l1_sharded_storage_tensor(
         ttnn.BufferType.L1,
         shard_spec,
     )
+    if per_core:
+        memory_config.experimental_set_per_core_allocation(True)
     allocator = ttnn.zeros if zero_initialize else ttnn.empty
     return allocator(
         (num_cores, elements_per_core),
@@ -2200,6 +2207,8 @@ def _l1_buffer_addresses_by_core(
     tensor: Any, device: Any
 ) -> Dict[Tuple[int, int], int]:
     """Return each shard's physical L1 base indexed by logical core."""
+    if _is_per_core_allocated(tensor):
+        return _resolve_per_core_tensor_addresses([tensor], (0,), None)[0]
     buffer_address = int(tensor.buffer_address())
     addresses = {}
     for page in ttnn._ttnn.reports.get_buffer_pages(device):
@@ -2750,6 +2759,7 @@ def build_dfb_reconfiguration_runtime_resources(
     scratch_layout_by_core_by_dfb = {}
     reconfigured_storage_indices = set()
     tensor_backed_storage_indices = set()
+    remote_uniform_storage_indices = set()
     for dfb_index, epochs in enumerate(plan.dfb_epochs):
         storage_indices = {
             _physical_dfb_storage_index(epoch.config) for epoch in epochs
@@ -2760,6 +2770,8 @@ def build_dfb_reconfiguration_runtime_resources(
             )
         storage_index = storage_indices.pop()
         storage_index_by_dfb[dfb_index] = storage_index
+        if any(epoch.config.address_scope == "remote_uniform" for epoch in epochs):
+            remote_uniform_storage_indices.add(storage_index)
         scratch_layout_by_core = {}
         for epoch in epochs:
             config = epoch.config
@@ -2887,6 +2899,10 @@ def build_dfb_reconfiguration_runtime_resources(
         key=lambda allocation: (-len(allocation[2]), -allocation[1], allocation[0])
     )
 
+    # Independent per-core addresses avoid cross-core free-space fragmentation
+    # under the hybrid allocator, but remote-uniform storage must keep one
+    # address on every core because remote writers address it locally.
+    per_core_allocation = os.environ.get("TT_METAL_ALLOCATOR_MODE_HYBRID", "0") == "1"
     scratch_tensors = []
     owned_l1_buffer_addresses = set()
     for storage_index, required_bytes, cores in pending_allocations:
@@ -2894,6 +2910,10 @@ def build_dfb_reconfiguration_runtime_resources(
             _make_singleton_core_ranges(sorted(cores)),
             required_bytes,
             resource_device,
+            per_core=(
+                per_core_allocation
+                and storage_index not in remote_uniform_storage_indices
+            ),
         )
         scratch_tensors.append(scratch_tensor)
         addresses_by_core = _l1_buffer_addresses_by_core(
