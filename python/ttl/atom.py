@@ -324,6 +324,12 @@ def _build_atom_spec(
     for node in ast.walk(fn_def):
         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
             loaded_names.add(node.id)
+    captured_values.update(
+        {
+            capture_name: scope[capture_name]
+            for capture_name in loaded_names & scope.keys()
+        }
+    )
 
     params = _classify_params(fn)
     local_names = _collect_local_names(fn_def) | {param.name for param in params}
