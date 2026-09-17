@@ -7263,6 +7263,57 @@ def test_l1_sharded_storage_counts_sparse_cores(monkeypatch):
     assert empty_calls[0][0] == (2, 512)
 
 
+def test_l1_sharded_storage_enables_per_core_allocation(monkeypatch):
+    fake_ttnn = _FakeTTNN()
+    fake_ttnn.ShardSpec = lambda *args: args
+    memory_config = SimpleNamespace(per_core=False)
+
+    def enable_per_core(enable):
+        memory_config.per_core = enable
+
+    memory_config.experimental_set_per_core_allocation = enable_per_core
+    fake_ttnn.MemoryConfig = lambda *args: memory_config
+    fake_ttnn.ShardOrientation = SimpleNamespace(ROW_MAJOR=object())
+    fake_ttnn.TensorMemoryLayout = SimpleNamespace(HEIGHT_SHARDED=object())
+    fake_ttnn.BufferType = SimpleNamespace(L1=object())
+    fake_ttnn.float32 = object()
+    fake_ttnn.ROW_MAJOR_LAYOUT = object()
+    empty_calls = []
+    fake_ttnn.empty = (
+        lambda shape, **kwargs: empty_calls.append((shape, kwargs)) or object()
+    )
+    monkeypatch.setattr(kernel_runner, "ttnn", fake_ttnn)
+
+    kernel_runner._allocate_l1_sharded_storage_tensor(
+        _FakeExplicitCoreRanges((0, 0), (1, 0)),
+        num_bytes=2048,
+        device=object(),
+        per_core=True,
+    )
+
+    assert memory_config.per_core
+    assert empty_calls[0][1]["memory_config"] is memory_config
+
+
+def test_l1_buffer_addresses_uses_per_core_tensor_addresses(monkeypatch):
+    tensor = SimpleNamespace(is_per_core_allocated=lambda: True)
+    expected_addresses = {(0, 0): 0x2000, (1, 0): 0x3000}
+    resolve_calls = []
+
+    def resolve_per_core(tensors, tensor_indices, mesh_coordinate):
+        resolve_calls.append((tensors, tensor_indices, mesh_coordinate))
+        return {0: expected_addresses}
+
+    monkeypatch.setattr(
+        kernel_runner, "_resolve_per_core_tensor_addresses", resolve_per_core
+    )
+
+    assert kernel_runner._l1_buffer_addresses_by_core(tensor, object()) == (
+        expected_addresses
+    )
+    assert resolve_calls == [([tensor], (0,), None)]
+
+
 def test_specialized_dfb_use_intersects_storage_segments(monkeypatch):
     monkeypatch.setattr(kernel_runner, "ttnn", _FakeTTNN())
     full_grid = _FakeExplicitCoreRanges((0, 0), (1, 0))
