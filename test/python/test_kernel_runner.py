@@ -122,8 +122,7 @@ class _FakePerCoreTensor(_FakePerCoreDeviceTensor):
     def __init__(self, grid, device_addresses):
         super().__init__(grid, device_addresses[0])
         self.device_tensors = [
-            _FakePerCoreDeviceTensor(grid, addresses)
-            for addresses in device_addresses
+            _FakePerCoreDeviceTensor(grid, addresses) for addresses in device_addresses
         ]
 
 
@@ -1188,13 +1187,41 @@ def test_compiler_dfb_plan_builds_uniform_remote_descriptors(monkeypatch):
     assert [descriptor.total_size for descriptor in descriptors] == [
         64,
         96,
+        64,
+        32,
         128,
+        64,
         32,
         64,
     ]
     assert [
         descriptor.format_descriptors[0].buffer_index for descriptor in descriptors
-    ] == [0, 2, 1, 3, 3]
+    ] == [0, 2, 2, 2, 1, 1, 3, 3]
+    assert [descriptor.uniform_address_group for descriptor in descriptors] == [
+        0,
+        3,
+        3,
+        3,
+        2,
+        2,
+        0,
+        0,
+    ]
+    local_descriptors = [
+        descriptor
+        for descriptor in descriptors
+        if descriptor.format_descriptors[0].buffer_index == 3
+    ]
+    assert all(
+        descriptor.uniform_address_group == 0
+        and len(
+            kernel_runner._core_range_coordinates(
+                descriptor.core_ranges, label="local descriptor"
+            )
+        )
+        == 1
+        for descriptor in local_descriptors
+    )
     assert [
         kernel_runner._core_range_coordinates(
             descriptor.core_ranges, label="descriptor"
@@ -1202,8 +1229,11 @@ def test_compiler_dfb_plan_builds_uniform_remote_descriptors(monkeypatch):
         for descriptor in descriptors
     ] == [
         {(0, 0), (1, 0), (2, 0)},
-        {(0, 0), (1, 0), (2, 0)},
-        {(0, 0), (1, 0)},
+        {(0, 0)},
+        {(1, 0)},
+        {(2, 0)},
+        {(1, 0)},
+        {(0, 0)},
         {(0, 0)},
         {(1, 0)},
     ]
@@ -1220,8 +1250,11 @@ def test_compiler_dfb_plan_builds_uniform_remote_descriptors(monkeypatch):
         for descriptor in descriptors
     ] == [
         [(0, 0, 0, 0), (1, 0, 1, 0), (2, 0, 2, 0)],
-        [(0, 0, 0, 0), (1, 0, 1, 0), (2, 0, 2, 0)],
-        [(0, 0, 0, 0), (1, 0, 1, 0)],
+        [(0, 0, 0, 0)],
+        [(1, 0, 1, 0)],
+        [(2, 0, 2, 0)],
+        [(1, 0, 1, 0)],
+        [(0, 0, 0, 0)],
         [(0, 0, 0, 0)],
         [(1, 0, 1, 0)],
     ]

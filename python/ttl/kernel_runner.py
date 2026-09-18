@@ -98,9 +98,7 @@ def get_remaining_l1_by_core_for_device(device, core_coordinates):
     info = ttnn._ttnn.reports.get_device_info(device)
     cb_base = int(info.address_at_first_l1_cb_buffer)
     cb_limit_address = cb_base + int(info.cb_limit)
-    first_occupied = {
-        tuple(core): cb_limit_address for core in core_coordinates
-    }
+    first_occupied = {tuple(core): cb_limit_address for core in core_coordinates}
     for page in ttnn._ttnn.reports.get_buffer_pages(device):
         if page.buffer_type != ttnn.BufferType.L1:
             continue
@@ -279,7 +277,8 @@ def _resolve_per_core_tensor_addresses(
                     (device_coord,) = device_tensor.device_coords()
                     address = int(
                         device_tensor.experimental_per_core_buffer_address(
-                            device_coord, core)
+                            device_coord, core
+                        )
                     )
                 except Exception as exc:
                     raise ValueError(
@@ -295,9 +294,7 @@ def _resolve_per_core_tensor_addresses(
             core_addresses[(x, y)] = addresses[0]
 
         addresses_by_tensor[tensor_index] = core_addresses
-        signature.append(
-            (tensor_index, tuple(sorted(core_addresses.items())))
-        )
+        signature.append((tensor_index, tuple(sorted(core_addresses.items()))))
 
     return addresses_by_tensor, tuple(signature)
 
@@ -314,9 +311,7 @@ def build_kernel_descriptors(
     expected_extra_common_runtime_args: Optional[int] = None,
     runtime_args_by_thread: Optional[Dict[str, List[Tuple[Any, List[int]]]]] = None,
     defines_by_thread: Optional[Dict[str, List[Tuple[str, str]]]] = None,
-    _per_core_tensor_addresses: Optional[
-        Dict[int, Dict[Tuple[int, int], int]]
-    ] = None,
+    _per_core_tensor_addresses: Optional[Dict[int, Dict[Tuple[int, int], int]]] = None,
 ) -> List[Any]:
     """
     Build kernel descriptors for ttnn.generic_op.
@@ -361,8 +356,8 @@ def build_kernel_descriptors(
     runtime_args_by_thread = runtime_args_by_thread or {}
     defines_by_thread = defines_by_thread or {}
     if _per_core_tensor_addresses is None:
-        _per_core_tensor_addresses, _signature = (
-            _resolve_per_core_tensor_addresses(tensors)
+        _per_core_tensor_addresses, _signature = _resolve_per_core_tensor_addresses(
+            tensors
         )
 
     for spec in kernel_specs:
@@ -410,18 +405,14 @@ def build_kernel_descriptors(
             descriptor_plans = []
             for common_args, coordinates in sorted(
                 common_args_to_cores.items(),
-                key=lambda item: min(
-                    item[1], key=lambda core: (core[1], core[0])
-                ),
+                key=lambda item: min(item[1], key=lambda core: (core[1], core[0])),
             ):
                 descriptor_ranges = (
                     kernel_ranges
                     if coordinates == kernel_coordinates
                     else _core_ranges_from_coordinates(coordinates)
                 )
-                descriptor_plans.append(
-                    (descriptor_ranges, list(common_args), True)
-                )
+                descriptor_plans.append((descriptor_ranges, list(common_args), True))
         else:
             common_runtime_args = [
                 tensors[index].buffer_address() for index in spec.tensor_indices
@@ -445,9 +436,11 @@ def build_kernel_descriptors(
             if define[0] not in kernel_define_names
         ]
         kernel_defines.extend(spec.defines)
-        for descriptor_ranges, common_runtime_args, filter_runtime_args in (
-            descriptor_plans
-        ):
+        for (
+            descriptor_ranges,
+            common_runtime_args,
+            filter_runtime_args,
+        ) in descriptor_plans:
             thread_runtime_args = runtime_args_by_thread.get(thread_name, [])
             if filter_runtime_args:
                 thread_runtime_args = [
@@ -552,9 +545,11 @@ def build_pipe_global_semaphores(
     # typed semaphore objects replace only this host/runtime binding.
     semaphore_args = (device, core_ranges, 0)
     semaphores = [
-        ttnn.create_global_semaphore(*semaphore_args)
-        if buffer_type is None
-        else ttnn.create_global_semaphore(*semaphore_args, buffer_type)
+        (
+            ttnn.create_global_semaphore(*semaphore_args)
+            if buffer_type is None
+            else ttnn.create_global_semaphore(*semaphore_args, buffer_type)
+        )
         for _ in range(count)
     ]
     addresses = [int(ttnn.get_global_semaphore_address(sem)) for sem in semaphores]
@@ -1013,7 +1008,14 @@ def validate_cb_descriptors_override(
     return descriptors
 
 
-def _cb_descriptor(index: int, geometry: CBGeometry, total_size: int, core_ranges):
+def _cb_descriptor(
+    index: int,
+    geometry: CBGeometry,
+    total_size: int,
+    core_ranges,
+    *,
+    uniform_address_group: int = 0,
+):
     cb_format = ttnn.CBFormatDescriptor(
         buffer_index=index,
         data_format=geometry.data_format,
@@ -1024,11 +1026,13 @@ def _cb_descriptor(index: int, geometry: CBGeometry, total_size: int, core_range
             else {}
         ),
     )
-    return ttnn.CBDescriptor(
+    descriptor = ttnn.CBDescriptor(
         total_size=total_size,
         core_ranges=core_ranges,
         format_descriptors=[cb_format],
     )
+    descriptor.uniform_address_group = uniform_address_group
+    return descriptor
 
 
 def _core_ranges_from_coordinates(coordinates: set[Tuple[int, int]]):
@@ -1230,9 +1234,7 @@ def _build_compiler_cb_descriptors_by_core(
                 raise ValueError(f"compiler DFB CB[{index}] changes address scope")
             by_index[index] = pages
             max_pages_by_index[index] = max(max_pages_by_index.get(index, 0), pages)
-        group_entries.append(
-            (by_index, coords, _core_ranges_from_coordinates(coords))
-        )
+        group_entries.append((by_index, coords, _core_ranges_from_coordinates(coords)))
     if covered != program_cores:
         raise ValueError(
             "compiler DFB groups do not cover the program grid; missing "
@@ -1295,33 +1297,44 @@ def _build_compiler_cb_descriptors_by_core(
 
     for index in remote_indices:
         geometry = geometries[index]
-        participant_ranges = []
-        for by_index, _coords, partition_ranges in group_entries:
-            if index in by_index:
-                participant_ranges.extend(partition_ranges.ranges())
-        descriptors.append(
-            _cb_descriptor(
-                index,
-                geometry,
-                max_pages_by_index[index] * geometry.page_size,
-                ttnn.CoreRangeSet(participant_ranges),
-            )
-        )
-
-    for index in local_indices:
-        geometry = geometries[index]
-        for by_index, _coords, partition_ranges in group_entries:
-            pages = by_index.get(index)
-            if pages is None:
-                continue
+        coordinates_by_pages = {}
+        for by_index, coords, _partition_ranges in group_entries:
+            if (pages := by_index.get(index)) is not None:
+                coordinates_by_pages.setdefault(pages, set()).update(coords)
+        # A group is only needed when one remotely addressed DFB has multiple
+        # per-core capacities.  A uniform-capacity DFB remains one ordinary
+        # descriptor and therefore has no peers to group with.
+        address_group = index + 1 if len(coordinates_by_pages) > 1 else 0
+        for pages, coordinates in sorted(coordinates_by_pages.items(), reverse=True):
             descriptors.append(
                 _cb_descriptor(
                     index,
                     geometry,
                     pages * geometry.page_size,
-                    partition_ranges,
+                    _core_ranges_from_coordinates(coordinates),
+                    uniform_address_group=address_group,
                 )
             )
+
+    for index in local_indices:
+        geometry = geometries[index]
+        for by_index, coords, _partition_ranges in group_entries:
+            pages = by_index.get(index)
+            if pages is None:
+                continue
+            # Local DFB addresses are never observed from another core. Keep
+            # their descriptors singleton-core so a core with a small
+            # specialized program does not inherit the program-local L1 base
+            # of an unrelated core that happens to have the same DFB plan.
+            for core in sorted(coords):
+                descriptors.append(
+                    _cb_descriptor(
+                        index,
+                        geometry,
+                        pages * geometry.page_size,
+                        _core_ranges_from_coordinates({core}),
+                    )
+                )
     return validate_cb_descriptors_override(
         descriptors=descriptors,
         program_core_ranges=core_ranges,
@@ -1441,7 +1454,6 @@ def run_kernel_on_device(
         pipe_global_semaphore_lifetime: Optional list replaced with the current
             call's GlobalSemaphore objects. Cached kernels keep this bounded
             owner list so repeated calls do not retain old semaphore objects.
-
     Returns:
         Result from ttnn.generic_op (typically None or output tensor).
     """
