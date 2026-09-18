@@ -565,6 +565,7 @@ class CompiledTTNNKernel:
         cb_configs=None,
         cb_names=None,
         program_hash=None,
+        program_l1_layout="uniform",
         source_lines=None,
         all_source_lines=None,
         thread_to_kernel=None,
@@ -621,6 +622,7 @@ class CompiledTTNNKernel:
         self.cb_configs = cb_configs or []
         self.cb_names = cb_names or {}
         self.program_hash = program_hash
+        self.program_l1_layout = program_l1_layout
         self.source_lines = source_lines
         self.all_source_lines = all_source_lines or {}
         self.thread_to_kernel = thread_to_kernel or {}
@@ -682,6 +684,7 @@ class CompiledTTNNKernel:
             cb_configs=self.cb_configs,
             core_ranges=self.core_ranges,
             program_hash=self.program_hash,
+            program_l1_layout=self.program_l1_layout,
             num_pipe_sync_semaphores=self.num_pipe_sync_semaphores,
             pipe_sram_scratch_bytes=self.pipe_sram_scratch_bytes,
             num_pipe_global_semaphores=self.num_pipe_global_semaphores,
@@ -716,6 +719,7 @@ class _CompiledTTNNKernelTemplate:
         self.cb_configs = [self._detach_cb(config) for config in kernel.cb_configs]
         self.cb_names = dict(kernel.cb_names)
         self.program_hash = kernel.program_hash
+        self.program_l1_layout = kernel.program_l1_layout
         self.source_lines = kernel.source_lines
         self.all_source_lines = dict(kernel.all_source_lines)
         self.thread_to_kernel = dict(kernel.thread_to_kernel)
@@ -755,6 +759,7 @@ class _CompiledTTNNKernelTemplate:
             cb_configs=list(self.cb_configs),
             cb_names=dict(self.cb_names),
             program_hash=self.program_hash,
+            program_l1_layout=self.program_l1_layout,
             source_lines=self.source_lines,
             all_source_lines=dict(self.all_source_lines),
             thread_to_kernel=dict(self.thread_to_kernel),
@@ -1006,6 +1011,7 @@ def _compile_ttnn_kernel(
     cb_configs=None,
     cb_names=None,
     program_hash=None,
+    program_l1_layout: str = "uniform",
     fp32_dest_acc_en: Optional[bool] = None,
     dst_full_sync_en: Optional[bool] = None,
     math_fidelity: Optional[str] = None,
@@ -1294,6 +1300,7 @@ def _compile_ttnn_kernel(
         cb_configs=cb_configs,
         cb_names=cb_names,
         program_hash=program_hash,
+        program_l1_layout=program_l1_layout,
         source_lines=source_lines,
         all_source_lines=all_source_lines,
         thread_to_kernel=thread_to_kernel,
@@ -1351,6 +1358,7 @@ def _compile_ttnn_kernel(
             num_tensors=len(args),
             output_path=runner_path,
             program_hash=program_hash,
+            program_l1_layout=program_l1_layout,
             kernel_name="ttlang_kernel",
             num_pipe_sync_semaphores=num_pipe_sync_semaphores,
             pipe_sram_scratch_bytes=pipe_sram_scratch_bytes,
@@ -1973,6 +1981,7 @@ def _compile_kernel(
     memory_space: str,
     tiled: bool,
     program_hash: int,
+    program_l1_layout: str = "uniform",
     fp32_dest_acc_en: Optional[bool] = None,
     dst_full_sync_en: Optional[bool] = None,
     math_fidelity: Optional[str] = None,
@@ -2107,6 +2116,7 @@ def _compile_kernel(
         math_fidelity=math_fidelity,
         compiler_options=compiler_options,
         program_hash=program_hash,
+        program_l1_layout=program_l1_layout,
         l1_budget_override=l1_budget_override,
         kernel_source_file=kernel_source_file,
         kernel_line_offset=kernel_line_offset,
@@ -2136,6 +2146,7 @@ def _lower_program_to_kernel(
     math_fidelity,
     compiler_options,
     program_hash,
+    program_l1_layout,
     l1_budget_override,
     kernel_source_file,
     kernel_line_offset,
@@ -2471,6 +2482,7 @@ def _lower_program_to_kernel(
             cb_configs,
             cb_names=cb_names,
             program_hash=program_hash,
+            program_l1_layout=program_l1_layout,
             fp32_dest_acc_en=fp32_dest_acc_en,
             dst_full_sync_en=dst_full_sync_en,
             math_fidelity=math_fidelity,
@@ -2640,7 +2652,9 @@ def _make_operation_wrapper(
     return _wrapper
 
 
-def _validate_operation_options(num_outs, memory_space, tiled) -> None:
+def _validate_operation_options(
+    num_outs, memory_space, tiled, program_l1_layout="uniform"
+) -> None:
     if num_outs != 1:
         raise ValueError(f"num_outs must be 1, got {num_outs}")
     if memory_space not in SUPPORTED_MEMORY_SPACES:
@@ -2650,6 +2664,11 @@ def _validate_operation_options(num_outs, memory_space, tiled) -> None:
         )
     if not isinstance(tiled, bool):
         raise TypeError(f"tiled must be a boolean, got {type(tiled).__name__}")
+    if program_l1_layout not in {"uniform", "per_core"}:
+        raise ValueError(
+            "program_l1_layout must be 'uniform' or 'per_core', "
+            f"got {program_l1_layout!r}"
+        )
 
 
 def pykernel_gen(
@@ -2663,6 +2682,7 @@ def pykernel_gen(
     dst_full_sync_en: Optional[bool] = None,
     math_fidelity: Optional[str] = None,
     options: Optional[str] = None,
+    program_l1_layout: str = "uniform",
     runtime_resource_factory=None,
     factory_cache=None,
     factory_cache_key=None,
@@ -2699,7 +2719,7 @@ def pykernel_gen(
     """
     if grid is None:
         raise ValueError("grid parameter is required")
-    _validate_operation_options(num_outs, memory_space, tiled)
+    _validate_operation_options(num_outs, memory_space, tiled, program_l1_layout)
     if iterator_types is not None and indexing_maps is None:
         raise ValueError("indexing_maps must be set when iterator_types is set")
 
@@ -2741,6 +2761,7 @@ def pykernel_gen(
                 memory_space,
                 tiled,
                 program_hash,
+                program_l1_layout=program_l1_layout,
                 fp32_dest_acc_en=fp32_dest_acc_en,
                 dst_full_sync_en=dst_full_sync_en,
                 math_fidelity=math_fidelity,

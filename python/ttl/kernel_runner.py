@@ -1418,6 +1418,7 @@ def run_kernel_on_device(
     cb_configs: List[Any],
     core_ranges: Any,
     program_hash: Optional[int] = None,
+    program_l1_layout: str = "uniform",
     num_pipe_sync_semaphores: int = 0,
     pipe_sram_scratch_bytes: int = 0,
     num_pipe_global_semaphores: int = 0,
@@ -1443,6 +1444,9 @@ def run_kernel_on_device(
             block_count, tensor (for dtype), and _cb_index attributes.
         core_ranges: ttnn.CoreRangeSet for kernel execution.
         program_hash: Hash for tt-metal program cache.
+        program_l1_layout: Static program-image layout contract. ``"uniform"``
+            preserves TT-Metal's default global frontier; ``"per_core"``
+            requires the process-wide TT_METAL_PER_CORE_PROGRAM_SIZE gate.
         num_pipe_sync_semaphores: Number of pipe synchronization semaphores
             allocated by the compiler.
         pipe_sram_scratch_bytes: Per-core SRAM scratch bytes required by
@@ -1604,6 +1608,15 @@ def run_kernel_on_device(
         cbs=cb_descriptors,
         semaphores=semaphore_descriptors,
     )
+    if program_l1_layout == "uniform":
+        program.program_l1_layout = ttnn.ProgramL1Layout.UNIFORM
+    elif program_l1_layout == "per_core":
+        program.program_l1_layout = ttnn.ProgramL1Layout.PER_CORE
+    else:
+        raise ValueError(
+            "program_l1_layout must be 'uniform' or 'per_core', "
+            f"got {program_l1_layout!r}"
+        )
     normalized_program_hash = _program_hash_with_resource_plan(
         program_hash,
         tuple(_compiler_dfb_groups) if compiler_dfb_plan_active else (),
@@ -1706,6 +1719,7 @@ def emit_runner_source(
     num_pipe_global_semaphores: int = 0,
     program_hash: Optional[int] = None,
     num_reset_sync_words: int = 0,
+    program_l1_layout: str = "uniform",
 ) -> str:
     """
     Emit Python source code for a standalone runner that invokes ttnn.generic_op.
@@ -1740,6 +1754,7 @@ def emit_runner_source(
     lines.append(f"GRID_ROWS = {grid_rows}")
     lines.append(f"NUM_TENSORS = {num_tensors}")
     lines.append(f"PROGRAM_HASH = {normalize_program_hash(program_hash)!r}")
+    lines.append(f"PROGRAM_L1_LAYOUT = {program_l1_layout!r}")
     lines.append(f"NUM_PIPE_SYNC_SEMAPHORES = {num_pipe_sync_semaphores}")
     lines.append(f"PIPE_SRAM_SCRATCH_BYTES = {pipe_sram_scratch_bytes}")
     lines.append(f"NUM_PIPE_GLOBAL_SEMAPHORES = {num_pipe_global_semaphores}")
@@ -1946,6 +1961,12 @@ def emit_runner_source(
     lines.append("        cbs=cb_descriptors,")
     lines.append("        semaphores=semaphore_descriptors,")
     lines.append("    )")
+    lines.append(
+        "    program.program_l1_layout = ("
+        "ttnn.ProgramL1Layout.PER_CORE "
+        "if PROGRAM_L1_LAYOUT == 'per_core' "
+        "else ttnn.ProgramL1Layout.UNIFORM)"
+    )
     lines.append("    if PROGRAM_HASH is not None:")
     lines.append("        program.custom_program_hash = PROGRAM_HASH")
     lines.append("")
@@ -1978,6 +1999,7 @@ def emit_runner_file(
     num_pipe_global_semaphores: int = 0,
     program_hash: Optional[int] = None,
     num_reset_sync_words: int = 0,
+    program_l1_layout: str = "uniform",
 ) -> str:
     """
     Emit a Python runner file for the compiled kernel.
@@ -1996,6 +2018,7 @@ def emit_runner_file(
         grid_rows=grid_rows,
         num_tensors=num_tensors,
         program_hash=program_hash,
+        program_l1_layout=program_l1_layout,
         kernel_name=kernel_name,
         num_pipe_sync_semaphores=num_pipe_sync_semaphores,
         pipe_sram_scratch_bytes=pipe_sram_scratch_bytes,

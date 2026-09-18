@@ -155,6 +155,10 @@ class _FakeTTNN:
             self.semaphores = semaphores
             self.custom_program_hash = None
 
+    class ProgramL1Layout(Enum):
+        UNIFORM = "uniform"
+        PER_CORE = "per_core"
+
     class SemaphoreDescriptor:
         def __init__(self, sem_id, core_ranges, initial_value):
             self.id = sem_id
@@ -486,6 +490,7 @@ def test_reset_sync_words_do_not_consume_local_semaphore_ids(monkeypatch):
         num_reset_sync_words=4,
     )
 
+    assert result["program"].program_l1_layout == fake_ttnn.ProgramL1Layout.UNIFORM
     assert [semaphore.id for semaphore in result["program"].semaphores] == list(
         range(16)
     )
@@ -507,6 +512,31 @@ def test_reset_sync_words_do_not_consume_local_semaphore_ids(monkeypatch):
         0x1080,
         0x10A0,
     ]
+
+
+def test_run_kernel_can_explicitly_request_per_core_program_layout(monkeypatch):
+    fake_ttnn = _FakeTTNN()
+    monkeypatch.setattr(kernel_runner, "ttnn", fake_ttnn)
+    monkeypatch.setattr(
+        kernel_runner, "get_min_remaining_l1_for_device", lambda _device: 0
+    )
+    tensor = _FakeTensor(object())
+    spec = kernel_runner.KernelSpec(
+        path="/tmp/kernel.cpp",
+        thread_type="noc",
+        tensor_indices=[0],
+        config=fake_ttnn.ReaderConfigDescriptor(),
+    )
+
+    result = kernel_runner.run_kernel_on_device(
+        kernel_specs=[spec],
+        tensors=[tensor],
+        cb_configs=[],
+        core_ranges=_FakeCoreRanges(),
+        program_l1_layout="per_core",
+    )
+
+    assert result["program"].program_l1_layout == fake_ttnn.ProgramL1Layout.PER_CORE
 
 
 def test_build_kernel_descriptors_checks_pipe_runtime_arg_count(monkeypatch):
@@ -1409,6 +1439,7 @@ def test_emit_runner_source_uses_shared_pipe_resource_helpers():
     assert "NUM_PIPE_GLOBAL_SEMAPHORES = 3" in source
     assert "NUM_RESET_SYNC_WORDS = 4" in source
     assert "PROGRAM_HASH = 18446744073709551614" in source
+    assert "PROGRAM_L1_LAYOUT = 'uniform'" in source
     assert "build_pipe_runtime_resources(" in source
     assert "build_kernel_descriptors(" in source
     assert "build_pipe_sync_semaphore_descriptors(" in source
@@ -1427,6 +1458,19 @@ def test_emit_runner_source_omits_program_hash_by_default():
     )
 
     assert "PROGRAM_HASH = None" in source
+
+
+def test_emit_runner_source_preserves_per_core_program_layout():
+    source = kernel_runner.emit_runner_source(
+        kernel_specs=[],
+        cb_configs=[],
+        grid_cols=1,
+        grid_rows=1,
+        num_tensors=1,
+        program_l1_layout="per_core",
+    )
+
+    assert "PROGRAM_L1_LAYOUT = 'per_core'" in source
 
 
 def test_emit_runner_source_preserves_explicit_data_movement_config(monkeypatch):

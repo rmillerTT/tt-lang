@@ -579,6 +579,7 @@ def _synthesize_thread_module(fn_name: str, body: List[ast.stmt]) -> ast.Module:
 
 def _cb_configs_from_lifted(lifted: Dict[str, DataflowBuffer]):
     """DataflowBuffer list indexed by CB index, matching _collect_cb_configs."""
+
     def page_count(dfb):
         pages = dfb.block_count
         for dim in dfb.shape:
@@ -600,15 +601,15 @@ def _cb_configs_from_lifted(lifted: Dict[str, DataflowBuffer]):
         if not members:
             configs.append(None)
             continue
-        config = copy.copy(max(
-            members,
-            key=lambda dfb: dfb.tile[0] * dfb.tile[1],
-        ))
-        config.debug_names = tuple(dict.fromkeys(
-            name
-            for dfb in members
-            for name in dfb.debug_names
-        ))
+        config = copy.copy(
+            max(
+                members,
+                key=lambda dfb: dfb.tile[0] * dfb.tile[1],
+            )
+        )
+        config.debug_names = tuple(
+            dict.fromkeys(name for dfb in members for name in dfb.debug_names)
+        )
         max_pages = max(page_count(dfb) for dfb in members)
         config.shape = (1, max_pages)
         config.block_count = 1
@@ -651,6 +652,7 @@ def _compile_atom(
     math_fidelity: Optional[str],
     target_arch: Optional[str],
     compiler_options: CompilerOptions,
+    program_l1_layout: str = "uniform",
     runtime_resource_factory=None,
 ):
 
@@ -766,6 +768,7 @@ def _compile_atom(
         math_fidelity=math_fidelity,
         compiler_options=compiler_options,
         program_hash=program_hash,
+        program_l1_layout=program_l1_layout,
         l1_budget_override=l1_budget_override,
         kernel_source_file=spec.source_file,
         kernel_line_offset=spec.line_offset,
@@ -797,6 +800,7 @@ def _compile_unified_operation(
         math_fidelity=decorator_options["math_fidelity"],
         target_arch=target_arch,
         compiler_options=compiler_options,
+        program_l1_layout=decorator_options["program_l1_layout"],
         runtime_resource_factory=decorator_options["runtime_resource_factory"],
     )
 
@@ -831,9 +835,7 @@ class Atom:
             prepare_call=prepare_call,
             factory_cache=decorator_options["factory_cache"],
             factory_cache_key=decorator_options["factory_cache_key"],
-            runtime_resource_factory=decorator_options[
-                "runtime_resource_factory"
-            ],
+            runtime_resource_factory=decorator_options["runtime_resource_factory"],
         )
         functools.update_wrapper(self, spec.fn)
 
@@ -859,6 +861,7 @@ def _unified_operation(
     dst_full_sync_en: Optional[bool] = None,
     math_fidelity: Optional[str] = None,
     options: Optional[str] = None,
+    program_l1_layout: str = "uniform",
     runtime_resource_factory=None,
     factory_cache=None,
     factory_cache_key=None,
@@ -869,7 +872,7 @@ def _unified_operation(
     / dst-sync overrides, compiler options). A grid is required for a
     top-level operation; a composed operation used only for expansion needs none.
     """
-    _validate_operation_options(num_outs, memory_space, tiled)
+    _validate_operation_options(num_outs, memory_space, tiled, program_l1_layout)
 
     def _decorator(f):
         spec = _build_atom_spec(f)
@@ -884,6 +887,7 @@ def _unified_operation(
                 "dst_full_sync_en": dst_full_sync_en,
                 "math_fidelity": math_fidelity,
                 "options": options,
+                "program_l1_layout": program_l1_layout,
                 "runtime_resource_factory": runtime_resource_factory,
                 "factory_cache": factory_cache,
                 "factory_cache_key": factory_cache_key,
@@ -904,6 +908,7 @@ def operation(
     dst_full_sync_en: Optional[bool] = None,
     math_fidelity: Optional[str] = None,
     options: Optional[str] = None,
+    program_l1_layout: str = "uniform",
     runtime_resource_factory=None,
     factory_cache=None,
     factory_cache_key=None,
@@ -926,6 +931,7 @@ def operation(
                 dst_full_sync_en=dst_full_sync_en,
                 math_fidelity=math_fidelity,
                 options=options,
+                program_l1_layout=program_l1_layout,
                 runtime_resource_factory=runtime_resource_factory,
                 factory_cache=factory_cache,
                 factory_cache_key=factory_cache_key,
@@ -943,6 +949,7 @@ def operation(
             dst_full_sync_en=dst_full_sync_en,
             math_fidelity=math_fidelity,
             options=options,
+            program_l1_layout=program_l1_layout,
             runtime_resource_factory=runtime_resource_factory,
             factory_cache=factory_cache,
             factory_cache_key=factory_cache_key,
