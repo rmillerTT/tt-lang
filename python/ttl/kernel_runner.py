@@ -51,6 +51,7 @@ def _ensure_ttnn():
 from .dataflow_buffer import (
     DFBReconfigurationPlan,
     DFBStorageSegment,
+    DFBAddressScope,
     PhysicalDFBConfig,
     _validate_tensor_backed_dfb_range,
     _validate_tensor_backed_dfb_tensor,
@@ -144,10 +145,10 @@ def _validate_physical_dfb_config(
             f"DFB[{config.dfb_index}] storage_index must be a nonnegative "
             f"integer, got {config.storage_index!r}"
         )
-    if config.address_scope not in {"local", "remote_uniform"}:
+    if not isinstance(config.address_scope, DFBAddressScope):
         raise ValueError(
-            f"DFB[{config.dfb_index}] address_scope must be 'local' or "
-            f"'remote_uniform', got {config.address_scope!r}"
+            f"DFB[{config.dfb_index}] address_scope must be a DFBAddressScope, "
+            f"got {config.address_scope!r}"
         )
     allocation_nodes = None
     if config.allocation_nodes is not None:
@@ -2770,7 +2771,10 @@ def build_dfb_reconfiguration_runtime_resources(
             )
         storage_index = storage_indices.pop()
         storage_index_by_dfb[dfb_index] = storage_index
-        if any(epoch.config.address_scope == "remote_uniform" for epoch in epochs):
+        if any(
+            epoch.config.address_scope == DFBAddressScope.REMOTE_UNIFORM
+            for epoch in epochs
+        ):
             remote_uniform_storage_indices.add(storage_index)
         scratch_layout_by_core = {}
         for epoch in epochs:
@@ -4135,7 +4139,7 @@ def _build_dfb_descriptors(
             )
 
     for dfb_index, config in enumerate(cb_configs):
-        if config.address_scope == "local" or not placements[dfb_index]:
+        if config.address_scope == DFBAddressScope.LOCAL or not placements[dfb_index]:
             continue
         matching_plans = [
             plan for plan in descriptor_plans if plan.physical_index == dfb_index
@@ -4143,7 +4147,7 @@ def _build_dfb_descriptors(
         required_nodes = set(placements[dfb_index])
         if len(matching_plans) != 1 or set(matching_plans[0].nodes) != required_nodes:
             raise ValueError(
-                f"DFB[{dfb_index}] address_scope={config.address_scope!r} "
+                f"DFB[{dfb_index}] address_scope={config.address_scope.value!r} "
                 "requires one descriptor over every allocated node"
             )
     descriptor_plans = _order_static_dfb_descriptor_plans(
@@ -5231,7 +5235,9 @@ def _append_physical_dfb_config_source(
     lines.append(f"{indent}    block_count={config.block_count},")
     lines.append(f"{indent}    page_size={config.page_size},")
     lines.append(f"{indent}    tile={config.tile!r},")
-    lines.append(f"{indent}    address_scope={config.address_scope!r},")
+    lines.append(
+        f"{indent}    address_scope=DFBAddressScope.{config.address_scope.name},"
+    )
     if config.storage_index is not None:
         lines.append(f"{indent}    storage_index={config.storage_index},")
     if config.allocation_nodes is not None:
@@ -5330,6 +5336,7 @@ def emit_runner_source(
     lines.append("")
     lines.append("import ttnn")
     lines.append("")
+    lines.append("from ttl.dataflow_buffer import DFBAddressScope")
     lines.append("from ttl.dataflow_buffer import DFBStorageSegment")
     lines.append("from ttl.dataflow_buffer import DFBConfigurationEpoch")
     lines.append("from ttl.dataflow_buffer import DFBReconfigurationPlan")

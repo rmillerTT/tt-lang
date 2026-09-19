@@ -40,7 +40,10 @@ class _FakeTensor:
         return _FakeTile()
 
 
-@pytest.mark.parametrize("address_scope", [None, "local", "remote_uniform"])
+@pytest.mark.parametrize(
+    "address_scope",
+    [None, "local", dataflow_buffer.DFBAddressScope.REMOTE_UNIFORM],
+)
 def test_all_dfb_factories_preserve_address_scope(monkeypatch, address_scope):
     monkeypatch.setattr("ttl.dtype_utils.is_ttnn_tensor", lambda tensor: True)
     tensor = _FakeTensor()
@@ -55,15 +58,20 @@ def test_all_dfb_factories_preserve_address_scope(monkeypatch, address_scope):
         tensor, shape=(1, 1), address_scope=address_scope
     )
 
-    assert explicit.address_scope == address_scope
-    assert tensor_like.address_scope == address_scope
-    assert tensor_backed.address_scope == address_scope
+    expected = (
+        None
+        if address_scope is None
+        else dataflow_buffer.DFBAddressScope(address_scope)
+    )
+    assert explicit.address_scope == expected
+    assert tensor_like.address_scope == expected
+    assert tensor_backed.address_scope == expected
 
 
 def test_invalid_address_scope_is_rejected():
     with pytest.raises(
         ValueError,
-        match="DFB address_scope must be 'local', 'remote_uniform', or None",
+        match="DFB address_scope must be DFBAddressScope.LOCAL",
     ):
         dataflow_buffer.make_dfb(
             "bf16", shape=(1, 1), address_scope="operation_uniform"
