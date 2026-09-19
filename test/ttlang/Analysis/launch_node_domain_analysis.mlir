@@ -6,9 +6,9 @@
 // CHECK:      entry = {(0,0), (0,1), (1,0), (1,1)}
 // CHECK-NEXT: x_zero = {(0,0), (0,1)}
 // CHECK-NEXT: x_nonzero = {(1,0), (1,1)}
+// CHECK-NEXT: not_x_zero = {(1,0), (1,1)}
 // CHECK-NEXT: nested_scf_if_result = {(0,0), (0,1)}
 // CHECK-NEXT: large_integer_expression = {(0,0), (0,1)}
-// CHECK-NEXT: not_x_zero = {(1,0), (1,1)}
 // CHECK-NEXT: scf_if_result = {(0,0), (0,1)}
 // CHECK-NEXT: joined = {(0,0), (0,1), (1,0), (1,1)}
 // CHECK-NEXT: empty = {}
@@ -73,6 +73,10 @@ module attributes {
       "test.observe"() {test.label = "x_zero"} : () -> ()
     } else {
       "test.observe"() {test.label = "x_nonzero"} : () -> ()
+    }
+    %not_x_zero = emitc.logical_not %is_x_zero : i1
+    scf.if %not_x_zero {
+      "test.observe"() {test.label = "not_x_zero"} : () -> ()
     }
 
     %c2_selected = arith.constant 2 : index
