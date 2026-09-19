@@ -21,11 +21,8 @@ namespace {
 
 namespace ttk = mlir::tt::ttkernel;
 
-/// Resolve a float-typed SSA value to its underlying signless integer bit
-/// pattern. Two sources are handled:
-///   1. unrealized_conversion_cast(iN -> fN) from RawElementReadLowering.
-///   2. arith.constant <float> -- materializes the bit pattern as an integer.
-/// Returns a null Value on failure.
+/// Resolve a float SSA value to integer bits from a conversion cast or
+/// constant. Returns null on failure.
 static Value resolveIntBits(Value floatVal, unsigned bitWidth,
                             OpBuilder &builder, Location loc) {
   if (auto cast = floatVal.getDefiningOp<UnrealizedConversionCastOp>()) {

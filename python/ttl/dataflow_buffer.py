@@ -33,10 +33,8 @@ def _next_cb_index(reuse, signature):
         previous = _dfb_reuse_indices.get(reuse)
         if previous is not None:
             index, previous_signature = previous
-            # One physical CB may serve different logical capacities and tile
-            # geometries. The runner collapses the group to the largest page
-            # geometry and page count. Changing dtype additionally requires
-            # compute data-format reconfiguration, so keep that explicit.
+            # Reused CBs may vary in capacity and geometry, but not dtype or
+            # address scope.
             if previous_signature[0] != signature[0]:
                 raise ValueError(
                     f"DFB reuse key {reuse!r} has incompatible declarations: "
@@ -124,9 +122,6 @@ class DataflowBuffer:
         self._cb_index = _next_cb_index(reuse, signature)
         self.reuse = reuse
         self.address_scope = address_scope
-        # Python identifiers this buffer was captured under. Filled in when the
-        # compiler walks thread closures; used only for debug output.
-        self.debug_names: Tuple[str, ...] = ()
 
     @property
     def dtype(self):
@@ -249,7 +244,7 @@ def make_dataflow_buffer_like(
         address_scope: Optional address contract. ``"local"`` permits exact
             per-core presence and capacity. ``"remote_uniform"`` retains one
             common capacity and base over every participating core for remote
-            NoC addressing. Omit for conservative legacy whole-grid allocation.
+            NoC addressing. Omit for conservative default whole-grid allocation.
 
     Returns:
         DataflowBuffer for use in thread function closures
@@ -308,7 +303,7 @@ def make_dfb(
         address_scope: Optional address contract. ``"local"`` permits exact
             per-core presence and capacity. ``"remote_uniform"`` retains one
             common capacity and base over every participating core for remote
-            NoC addressing. Omit for conservative legacy whole-grid allocation.
+            NoC addressing. Omit for conservative default whole-grid allocation.
 
     Returns:
         DataflowBuffer for use in thread function closures

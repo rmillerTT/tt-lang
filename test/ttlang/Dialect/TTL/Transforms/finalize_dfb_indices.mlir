@@ -124,7 +124,13 @@ func.func @overlapping_no_reuse()
   %cb2 = ttl.bind_cb {cb_index = 2, block_count = 2} : !ttl.cb<[1, 1], !ttcore.tile<32x32, bf16>, 2>
   %alloc3 = ttl.bind_cb {cb_index = 3, block_count = 2} {ttl.compiler_allocated} : !ttl.cb<[1, 1], !ttcore.tile<32x32, bf16>, 2>
   %alloc4 = ttl.bind_cb {cb_index = 4, block_count = 2} {ttl.compiler_allocated} : !ttl.cb<[1, 1], !ttcore.tile<32x32, bf16>, 2>
+  %r3 = ttl.cb_reserve %alloc3 : <[1, 1], !ttcore.tile<32x32, bf16>, 2> -> tensor<1x1x!ttcore.tile<32x32, bf16>>
+  ttl.cb_push %alloc3 : <[1, 1], !ttcore.tile<32x32, bf16>, 2>
+  %r4 = ttl.cb_reserve %alloc4 : <[1, 1], !ttcore.tile<32x32, bf16>, 2> -> tensor<1x1x!ttcore.tile<32x32, bf16>>
+  ttl.cb_push %alloc4 : <[1, 1], !ttcore.tile<32x32, bf16>, 2>
+  %w4 = ttl.cb_wait %alloc4 : <[1, 1], !ttcore.tile<32x32, bf16>, 2> -> tensor<1x1x!ttcore.tile<32x32, bf16>>
   ttl.cb_pop %alloc4 : <[1, 1], !ttcore.tile<32x32, bf16>, 2>
+  %w3 = ttl.cb_wait %alloc3 : <[1, 1], !ttcore.tile<32x32, bf16>, 2> -> tensor<1x1x!ttcore.tile<32x32, bf16>>
   ttl.cb_pop %alloc3 : <[1, 1], !ttcore.tile<32x32, bf16>, 2>
   return
 }
@@ -132,10 +138,10 @@ func.func @overlapping_no_reuse()
 // -----
 
 // Four compiler-allocated DFBs with nested lifetimes (softmax pattern).
-// DFB-A [bind, pop]: spans past DFB-B
-// DFB-B [bind, pop]: nested within A, dies before A
-// DFB-C [bind, pop]: starts after A dies, spans past DFB-D
-// DFB-D [bind, pop]: nested within C, dies before C
+// DFB-A [reserve, pop]: spans past DFB-B
+// DFB-B [reserve, pop]: nested within A, dies before A
+// DFB-C [reserve, pop]: starts after A dies, spans past DFB-D
+// DFB-D [reserve, pop]: nested within C, dies before C
 // Result: A and C share slot 0 (index 3), B and D share slot 1 (index 4).
 
 // DEBUG: DFB reuse: cb5 -> cb3
@@ -170,11 +176,23 @@ func.func @four_dfbs_nested_reuse()
   %cb2 = ttl.bind_cb {cb_index = 2, block_count = 2} : !ttl.cb<[1, 1], !ttcore.tile<32x32, bf16>, 2>
   %allocA = ttl.bind_cb {cb_index = 3, block_count = 2} {ttl.compiler_allocated} : !ttl.cb<[1, 1], !ttcore.tile<32x32, bf16>, 2>
   %allocB = ttl.bind_cb {cb_index = 4, block_count = 2} {ttl.compiler_allocated} : !ttl.cb<[1, 1], !ttcore.tile<32x32, bf16>, 2>
+  %rA = ttl.cb_reserve %allocA : <[1, 1], !ttcore.tile<32x32, bf16>, 2> -> tensor<1x1x!ttcore.tile<32x32, bf16>>
+  ttl.cb_push %allocA : <[1, 1], !ttcore.tile<32x32, bf16>, 2>
+  %rB = ttl.cb_reserve %allocB : <[1, 1], !ttcore.tile<32x32, bf16>, 2> -> tensor<1x1x!ttcore.tile<32x32, bf16>>
+  ttl.cb_push %allocB : <[1, 1], !ttcore.tile<32x32, bf16>, 2>
+  %wB = ttl.cb_wait %allocB : <[1, 1], !ttcore.tile<32x32, bf16>, 2> -> tensor<1x1x!ttcore.tile<32x32, bf16>>
   ttl.cb_pop %allocB : <[1, 1], !ttcore.tile<32x32, bf16>, 2>
+  %wA = ttl.cb_wait %allocA : <[1, 1], !ttcore.tile<32x32, bf16>, 2> -> tensor<1x1x!ttcore.tile<32x32, bf16>>
   ttl.cb_pop %allocA : <[1, 1], !ttcore.tile<32x32, bf16>, 2>
   %allocC = ttl.bind_cb {cb_index = 5, block_count = 2} {ttl.compiler_allocated} : !ttl.cb<[1, 1], !ttcore.tile<32x32, bf16>, 2>
   %allocD = ttl.bind_cb {cb_index = 6, block_count = 2} {ttl.compiler_allocated} : !ttl.cb<[1, 1], !ttcore.tile<32x32, bf16>, 2>
+  %rC = ttl.cb_reserve %allocC : <[1, 1], !ttcore.tile<32x32, bf16>, 2> -> tensor<1x1x!ttcore.tile<32x32, bf16>>
+  ttl.cb_push %allocC : <[1, 1], !ttcore.tile<32x32, bf16>, 2>
+  %rD = ttl.cb_reserve %allocD : <[1, 1], !ttcore.tile<32x32, bf16>, 2> -> tensor<1x1x!ttcore.tile<32x32, bf16>>
+  ttl.cb_push %allocD : <[1, 1], !ttcore.tile<32x32, bf16>, 2>
+  %wD = ttl.cb_wait %allocD : <[1, 1], !ttcore.tile<32x32, bf16>, 2> -> tensor<1x1x!ttcore.tile<32x32, bf16>>
   ttl.cb_pop %allocD : <[1, 1], !ttcore.tile<32x32, bf16>, 2>
+  %wC = ttl.cb_wait %allocC : <[1, 1], !ttcore.tile<32x32, bf16>, 2> -> tensor<1x1x!ttcore.tile<32x32, bf16>>
   ttl.cb_pop %allocC : <[1, 1], !ttcore.tile<32x32, bf16>, 2>
   return
 }
@@ -300,7 +318,7 @@ func.func @single_dfb_no_reuse()
 // DEBUG: Total DFB count: 1
 
 // USER: ttl.dfb_index_map = [{new_index = 0 : i32, old_index = 1 : i32}]
-// USER: ttl.logical_dfb_configs = [{element_type = !ttcore.tile<32x32, bf16>, epoch = 0 : i32, logical_index = 0 : i32, num_pages = 2 : i32, physical_index = 0 : i32, unpack_to_dest_fp32 = false}, {element_type = !ttcore.tile<32x32, bf16>, epoch = 0 : i32, logical_index = 1 : i32, num_pages = 2 : i32, physical_index = 0 : i32, unpack_to_dest_fp32 = false}]
+// USER: ttl.logical_dfb_configs = [{block_count = 2 : i32, compiler_allocated = false, element_type = !ttcore.tile<32x32, bf16>, elems_per_block = 1 : i32, epoch = 0 : i32, logical_index = 0 : i32, num_pages = 2 : i32, physical_index = 0 : i32, unpack_to_dest_fp32 = false}, {block_count = 2 : i32, compiler_allocated = false, element_type = !ttcore.tile<32x32, bf16>, elems_per_block = 1 : i32, epoch = 0 : i32, logical_index = 1 : i32, num_pages = 2 : i32, physical_index = 0 : i32, unpack_to_dest_fp32 = false}]
 
 // USER-LABEL: func.func @thread_local_user
 // USER-SAME: ttl.base_cta_index = 1 : i32
@@ -374,13 +392,13 @@ func.func @xt_compute()
 
 // EPOCH: ttl.dfb_epoch_physical_configs = [{dfb_index = 0 : i32, element_type = !ttcore.tile<32x32, bf16>, tile_height = 32 : i32, tile_width = 32 : i32, total_size = 8192 : i64}]
 // EPOCH: ttl.dfb_index_map = [{new_index = 0 : i32, old_index = 1 : i32}]
-// EPOCH: ttl.logical_dfb_configs = [{element_type = !ttcore.tile<32x32, bf16>, epoch = 0 : i32, logical_index = 0 : i32, num_pages = 2 : i32, physical_index = 0 : i32, unpack_to_dest_fp32 = false}, {element_type = !ttcore.tile<32x32, f32>, epoch = 1 : i32, logical_index = 1 : i32, num_pages = 2 : i32, physical_index = 0 : i32, unpack_to_dest_fp32 = false}]
+// EPOCH: ttl.logical_dfb_configs = [{block_count = 2 : i32, compiler_allocated = false, element_type = !ttcore.tile<32x32, bf16>, elems_per_block = 1 : i32, epoch = 0 : i32, logical_index = 0 : i32, num_pages = 2 : i32, physical_index = 0 : i32, unpack_to_dest_fp32 = false}, {block_count = 2 : i32, compiler_allocated = false, element_type = !ttcore.tile<32x32, f32>, elems_per_block = 1 : i32, epoch = 1 : i32, logical_index = 1 : i32, num_pages = 2 : i32, physical_index = 0 : i32, unpack_to_dest_fp32 = false}]
 // EPOCH-LABEL: func.func @epoch_restart
 // EPOCH: ttl.bind_cb{cb_index = 0, block_count = 2} {ttl.dfb_logical_index = 0 : i64}
 // EPOCH: ttl.bind_cb{cb_index = 0, block_count = 2} {ttl.dfb_logical_index = 1 : i64}
-// EPOCH: ttl.opaque_call "ttlang::reset_dataflow_buffers"() {header = "ttlang/Target/TTKernel/LLKs/reset_dataflow_buffers.h", template_args = [0, 1, 0, 4096, 2, 2048, 5, 32, 32, 16, 4, 5, 5], ttl.dfb_reset_epoch = 0 : i32}
+// EPOCH: ttl.opaque_call "ttlang::reset_dataflow_buffers"() {header = "ttlang/Target/TTKernel/LLKs/reset_dataflow_buffers.h", template_args = [0, 1, 0, 4096, 2, 2048, 5, 32, 32, 16, 4, 5, 5], ttl.dfb_reset_epoch = 0 : i32, ttl.dfb_reset_preserved_indices = []}
 // EPOCH: ttl.cb_reserve
-// EPOCH: ttl.opaque_call "ttlang::reset_dataflow_buffers"() {header = "ttlang/Target/TTKernel/LLKs/reset_dataflow_buffers.h", template_args = [0, 1, 0, 8192, 2, 4096, 0, 32, 32, 16, 4, 5, 5], ttl.dfb_reset_epoch = 1 : i32}
+// EPOCH: ttl.opaque_call "ttlang::reset_dataflow_buffers"() {header = "ttlang/Target/TTKernel/LLKs/reset_dataflow_buffers.h", template_args = [0, 1, 0, 8192, 2, 4096, 0, 32, 32, 16, 4, 5, 5], ttl.dfb_reset_epoch = 1 : i32, ttl.dfb_reset_preserved_indices = []}
 // EPOCH: ttl.cb_reserve
 // EPOCH-NOT: cb_index = 1
 // EPOCH: return
@@ -411,12 +429,12 @@ func.func @epoch_restart()
 // CYCLIC2: ttl.dfb_index_map = [{new_index = 0 : i32, old_index = 1 : i32}]
 // CYCLIC2-LABEL: func.func @two_phase_resident_loop
 // CYCLIC2-COUNT-2: ttl.bind_cb{cb_index = 0,
-// CYCLIC2: ttl.opaque_call "ttlang::reset_dataflow_buffers"() {header = "ttlang/Target/TTKernel/LLKs/reset_dataflow_buffers.h", template_args = [0, 1, 0, 4096, 2, 2048, 5, 32, 32, 16, 4, 5, 5], ttl.dfb_reset_epoch = 0 : i32}
+// CYCLIC2: ttl.opaque_call "ttlang::reset_dataflow_buffers"() {header = "ttlang/Target/TTKernel/LLKs/reset_dataflow_buffers.h", template_args = [0, 1, 0, 4096, 2, 2048, 5, 32, 32, 16, 4, 5, 5], ttl.dfb_reset_epoch = 0 : i32, ttl.dfb_reset_preserved_indices = []}
 // CYCLIC2: scf.for
 // CYCLIC2: ttl.cb_reserve
-// CYCLIC2: ttl.opaque_call "ttlang::reset_dataflow_buffers"() {header = "ttlang/Target/TTKernel/LLKs/reset_dataflow_buffers.h", template_args = [0, 1, 0, 8192, 2, 4096, 0, 32, 32, 16, 4, 5, 5], ttl.dfb_reset_epoch = 1 : i32}
+// CYCLIC2: ttl.opaque_call "ttlang::reset_dataflow_buffers"() {header = "ttlang/Target/TTKernel/LLKs/reset_dataflow_buffers.h", template_args = [0, 1, 0, 8192, 2, 4096, 0, 32, 32, 16, 4, 5, 5], ttl.dfb_reset_epoch = 1 : i32, ttl.dfb_reset_preserved_indices = []}
 // CYCLIC2: ttl.cb_reserve
-// CYCLIC2: ttl.opaque_call "ttlang::reset_dataflow_buffers"() {header = "ttlang/Target/TTKernel/LLKs/reset_dataflow_buffers.h", template_args = [0, 1, 0, 4096, 2, 2048, 5, 32, 32, 16, 4, 5, 5], ttl.dfb_reset_epoch = 0 : i32}
+// CYCLIC2: ttl.opaque_call "ttlang::reset_dataflow_buffers"() {header = "ttlang/Target/TTKernel/LLKs/reset_dataflow_buffers.h", template_args = [0, 1, 0, 4096, 2, 2048, 5, 32, 32, 16, 4, 5, 5], ttl.dfb_reset_epoch = 0 : i32, ttl.dfb_reset_preserved_indices = []}
 // CYCLIC2: return
 func.func @two_phase_resident_loop()
     attributes {ttl.kernel_thread = #ttkernel.thread<compute>, ttl.base_cta_index = 2 : i32,
@@ -450,11 +468,11 @@ func.func @two_phase_resident_loop()
 // CYCLIC3: ttl.dfb_index_map = [{new_index = 0 : i32, old_index = 1 : i32}, {new_index = 0 : i32, old_index = 2 : i32}]
 // CYCLIC3-LABEL: func.func @three_phase_resident_loop
 // CYCLIC3-COUNT-3: ttl.bind_cb{cb_index = 0,
-// CYCLIC3: ttl.opaque_call "ttlang::reset_dataflow_buffers"() {header = "ttlang/Target/TTKernel/LLKs/reset_dataflow_buffers.h", template_args = [0, 1, 0, 4096, 2, 2048, 5, 32, 32, 16, 4, 5, 5], ttl.dfb_reset_epoch = 0 : i32}
+// CYCLIC3: ttl.opaque_call "ttlang::reset_dataflow_buffers"() {header = "ttlang/Target/TTKernel/LLKs/reset_dataflow_buffers.h", template_args = [0, 1, 0, 4096, 2, 2048, 5, 32, 32, 16, 4, 5, 5], ttl.dfb_reset_epoch = 0 : i32, ttl.dfb_reset_preserved_indices = []}
 // CYCLIC3: scf.for
-// CYCLIC3: ttl.opaque_call "ttlang::reset_dataflow_buffers"() {header = "ttlang/Target/TTKernel/LLKs/reset_dataflow_buffers.h", template_args = [0, 1, 0, 8192, 2, 4096, 0, 32, 32, 16, 4, 5, 5], ttl.dfb_reset_epoch = 1 : i32}
-// CYCLIC3: ttl.opaque_call "ttlang::reset_dataflow_buffers"() {header = "ttlang/Target/TTKernel/LLKs/reset_dataflow_buffers.h", template_args = [0, 1, 0, 2048, 2, 1024, 5, 16, 32, 16, 2, 5, 5], ttl.dfb_reset_epoch = 2 : i32}
-// CYCLIC3: ttl.opaque_call "ttlang::reset_dataflow_buffers"() {header = "ttlang/Target/TTKernel/LLKs/reset_dataflow_buffers.h", template_args = [0, 1, 0, 4096, 2, 2048, 5, 32, 32, 16, 4, 5, 5], ttl.dfb_reset_epoch = 0 : i32}
+// CYCLIC3: ttl.opaque_call "ttlang::reset_dataflow_buffers"() {header = "ttlang/Target/TTKernel/LLKs/reset_dataflow_buffers.h", template_args = [0, 1, 0, 8192, 2, 4096, 0, 32, 32, 16, 4, 5, 5], ttl.dfb_reset_epoch = 1 : i32, ttl.dfb_reset_preserved_indices = []}
+// CYCLIC3: ttl.opaque_call "ttlang::reset_dataflow_buffers"() {header = "ttlang/Target/TTKernel/LLKs/reset_dataflow_buffers.h", template_args = [0, 1, 0, 2048, 2, 1024, 5, 16, 32, 16, 2, 5, 5], ttl.dfb_reset_epoch = 2 : i32, ttl.dfb_reset_preserved_indices = []}
+// CYCLIC3: ttl.opaque_call "ttlang::reset_dataflow_buffers"() {header = "ttlang/Target/TTKernel/LLKs/reset_dataflow_buffers.h", template_args = [0, 1, 0, 4096, 2, 2048, 5, 32, 32, 16, 4, 5, 5], ttl.dfb_reset_epoch = 0 : i32, ttl.dfb_reset_preserved_indices = []}
 // CYCLIC3: return
 func.func @three_phase_resident_loop()
     attributes {ttl.kernel_thread = #ttkernel.thread<compute>, ttl.base_cta_index = 3 : i32,
@@ -490,7 +508,7 @@ func.func @three_phase_resident_loop()
 // The logical configuration records FP32 unpack routing even without a reset
 // epoch, so later per-core analysis does not lose the compute-kernel contract.
 
-// UNPACK: ttl.logical_dfb_configs = [{element_type = !ttcore.tile<32x32, f32>, epoch = 0 : i32, logical_index = 0 : i32, num_pages = 2 : i32, physical_index = 0 : i32, unpack_to_dest_fp32 = true}]
+// UNPACK: ttl.logical_dfb_configs = [{block_count = 2 : i32, compiler_allocated = false, element_type = !ttcore.tile<32x32, f32>, elems_per_block = 1 : i32, epoch = 0 : i32, logical_index = 0 : i32, num_pages = 2 : i32, physical_index = 0 : i32, unpack_to_dest_fp32 = true}]
 // UNPACK-LABEL: func.func @no_reset_unpack_to_dest_fp32
 func.func @no_reset_unpack_to_dest_fp32()
     attributes {ttl.kernel_thread = #ttkernel.thread<compute>,
@@ -518,7 +536,7 @@ func.func @no_reset_unpack_to_dest_fp32()
 // PRESERVE: ttl.bind_cb{cb_index = 1, block_count = 2} {ttl.dfb_logical_index = 2 : i64}
 // PRESERVE: ttl.bind_cb{cb_index = 0, block_count = 2} {ttl.dfb_logical_index = 3 : i64}
 // Prologue: configure the local DFB and pinned DFB.
-// PRESERVE: ttl.opaque_call "ttlang::reset_dataflow_buffers"(%{{.*}}) {header = "ttlang/Target/TTKernel/LLKs/reset_dataflow_buffers.h", template_args = [0, 2, 0, {{.*}}, 1, {{.*}}], ttl.dfb_reset_epoch = 0 : i32, ttl.dfb_reset_preserved_indices = []}
+// PRESERVE: ttl.opaque_call "ttlang::reset_dataflow_buffers"() {header = "ttlang/Target/TTKernel/LLKs/reset_dataflow_buffers.h", template_args = [0, 2, 0, {{.*}}, 1, {{.*}}], ttl.dfb_reset_epoch = 0 : i32, ttl.dfb_reset_preserved_indices = []}
 // First boundary: preserve physical DFB 1 and configure only local DFB 0.
 // PRESERVE: ttl.opaque_call "ttlang::reset_dataflow_buffers"(%{{.*}}) {header = "ttlang/Target/TTKernel/LLKs/reset_dataflow_buffers.h", template_args = [0, 1, 0, {{.*}}], ttl.dfb_reset_epoch = 1 : i32, ttl.dfb_reset_preserved_indices = [1]}
 // Second boundary: reset and configure both physical DFBs.

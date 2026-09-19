@@ -28,12 +28,7 @@ static RankedTensorType getTensorType(Value v) {
   return dyn_cast<RankedTensorType>(v.getType());
 }
 
-/// Preserve an existing sub-tile shape while deriving a compute-body tile.
-///
-/// Ranked tensors produced by the TT-Lang frontend already use
-/// `ttcore::TileType` elements. Calling `TileType::get(Type)` on that element
-/// keeps its data format but reconstructs the default 32x32 shape. Scalar
-/// element types still need wrapping in a default hardware tile.
+/// Preserve existing TileType geometry; wrap scalar elements in default tiles.
 static ttcore::TileType getTileTypeForElement(Type elementType) {
   if (auto tileType = dyn_cast<ttcore::TileType>(elementType)) {
     return tileType;
@@ -41,10 +36,7 @@ static ttcore::TileType getTileTypeForElement(Type elementType) {
   return ttcore::TileType::get(elementType);
 }
 
-/// Derive the hardware tile-level BcastType from the normalized broadcast
-/// dims. Returns std::nullopt when no innermost dimension is broadcast (the
-/// broadcast is then purely inter-tile and the body just passes the input
-/// tile through).
+/// Return the hardware broadcast for innermost dimensions, if any.
 static std::optional<BcastType>
 deriveTileBcastType(const llvm::SmallDenseSet<int64_t> &broadcastDims,
                     int64_t rank) {
@@ -878,8 +870,7 @@ static LogicalResult buildComputeFromInputs(
     if (!inputType) {
       return rewriter.notifyMatchFailure(op, "input is not a ranked tensor");
     }
-    inputTileTypes.push_back(
-        getTileTypeForElement(inputType.getElementType()));
+    inputTileTypes.push_back(getTileTypeForElement(inputType.getElementType()));
   }
   Type outputTileType = getTileTypeForElement(outputType.getElementType());
 

@@ -183,11 +183,8 @@ struct TTLVerifyDFBSPSCPass
   void runOnOperation() override {
     ModuleOp module = getOperation();
 
-    // This is an explicit escape hatch for compositions whose external
-    // synchronization/lifetime contract is stronger than the launch-domain
-    // analysis can currently prove.  Returning before diagnostics are emitted
-    // is essential: emitting errors and merely declining to fail the pass
-    // leaves unconsumed Python diagnostic captures and aborts the compiler.
+    // Explicit escape hatch for externally synchronized compositions.
+    // Return before emitting diagnostics so Python captures remain balanced.
     if (std::getenv("TTL_RELAX_DFB_SPSC")) {
       return;
     }

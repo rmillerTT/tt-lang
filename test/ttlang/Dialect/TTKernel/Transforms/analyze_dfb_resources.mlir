@@ -1,20 +1,20 @@
 // RUN: ttlang-opt %s --split-input-file -pass-pipeline='builtin.module(ttkernel-specialize-cores,canonicalize,cse,ttkernel-analyze-dfb-resources)' | FileCheck %s
 
 // Surviving DFB uses are unioned across specialized RISC functions. Omitted
-// scope keeps conservative legacy placement, while explicitly local and
+// The default scope keeps conservative whole-grid placement, while local and
 // remote-uniform DFBs use their surviving participant sets.
 
 // CHECK: ttl.per_core_dfb_configs =
-// CHECK-SAME: address_scope = "legacy", dfb_index = 0 : i32, num_pages = 2 : i32
+// CHECK-SAME: address_scope = "default", dfb_index = 0 : i32, num_pages = 2 : i32
 // CHECK-SAME: address_scope = "local", dfb_index = 1 : i32, num_pages = 1 : i32
 // CHECK-SAME: address_scope = "remote_uniform", dfb_index = 2 : i32, num_pages = 2 : i32
 // CHECK-SAME: address_scope = "local", dfb_index = 3 : i32, num_pages = 3 : i32
 // CHECK-SAME: address_scope = "remote_uniform", dfb_index = 4 : i32, num_pages = 1 : i32
-// CHECK-SAME: address_scope = "legacy", dfb_index = 0 : i32, num_pages = 2 : i32
+// CHECK-SAME: address_scope = "default", dfb_index = 0 : i32, num_pages = 2 : i32
 // CHECK-SAME: address_scope = "remote_uniform", dfb_index = 2 : i32, num_pages = 4 : i32
 // CHECK-SAME: address_scope = "local", dfb_index = 3 : i32, num_pages = 5 : i32
 // CHECK-SAME: address_scope = "remote_uniform", dfb_index = 4 : i32, num_pages = 1 : i32
-// CHECK-SAME: address_scope = "legacy", dfb_index = 0 : i32, num_pages = 2 : i32
+// CHECK-SAME: address_scope = "default", dfb_index = 0 : i32, num_pages = 2 : i32
 // CHECK-SAME: address_scope = "local", dfb_index = 3 : i32, num_pages = 5 : i32
 // CHECK-SAME: address_scope = "remote_uniform", dfb_index = 4 : i32, num_pages = 1 : i32
 
@@ -30,14 +30,14 @@ module attributes {
     {address_scope = "remote_uniform", element_type = !ttcore.tile<32x32, bf16>, epoch = 0 : i32, logical_index = 6 : i32, num_pages = 1 : i32, physical_index = 4 : i32, unpack_to_dest_fp32 = false}
   ]
 } {
-  func.func @legacy_and_local() {
+  func.func @default_and_local() {
     %c0 = arith.constant 0 : index
     %x = ttkernel.my_logical_x_ : () -> index
     %active = arith.cmpi eq, %x, %c0 : index
     scf.if %active {
-      %legacy = ttkernel.get_compile_time_arg_val(0) {ttl.dfb_logical_index = 0 : i64} : () -> !ttkernel.cb<2, !ttcore.tile<32x32, bf16>>
+      %default = ttkernel.get_compile_time_arg_val(0) {ttl.dfb_logical_index = 0 : i64} : () -> !ttkernel.cb<2, !ttcore.tile<32x32, bf16>>
       %local = ttkernel.get_compile_time_arg_val(1) {ttl.dfb_logical_index = 1 : i64} : () -> !ttkernel.cb<1, !ttcore.tile<32x32, bf16>>
-      ttkernel.opaque_call "use"(%legacy, %local) {header = "use.hpp"} : (!ttkernel.cb<2, !ttcore.tile<32x32, bf16>>, !ttkernel.cb<1, !ttcore.tile<32x32, bf16>>) -> ()
+      ttkernel.opaque_call "use"(%default, %local) {header = "use.hpp"} : (!ttkernel.cb<2, !ttcore.tile<32x32, bf16>>, !ttkernel.cb<1, !ttcore.tile<32x32, bf16>>) -> ()
     }
     return
   }
@@ -180,7 +180,7 @@ module attributes {
 // -----
 
 // Capacity is measured in bytes across reset epochs, then rounded up to pages
-// of the physical descriptor's initial format. A legacy logical DFB contributes
+// of the physical descriptor's initial format. A default logical DFB contributes
 // its own capacity everywhere without defeating a remote-uniform logical DFB
 // that reuses the same physical slot in a later epoch.
 

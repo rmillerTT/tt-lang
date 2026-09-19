@@ -47,7 +47,6 @@ from ttl.pykernel._src.utils import _cleanup_source_code
 from ._src.atom_inline import inline_atom_calls
 from ._src.atom_split import split_function_body
 from ._src.tensor_registry import register_tensor_name
-from .cb_table import record_dfb_name, write_logical_dfb_table
 from .compiler_options import CompilerOptions
 from .dataflow_buffer import (
     DataflowBuffer,
@@ -586,9 +585,6 @@ def _cb_configs_from_lifted(lifted: Dict[str, DataflowBuffer]):
             pages *= dim
         return pages
 
-    for name, dfb in lifted.items():
-        record_dfb_name(dfb, name)
-    write_logical_dfb_table(lifted)
     by_index: Dict[int, List[DataflowBuffer]] = {}
     for dfb in lifted.values():
         by_index.setdefault(dfb._cb_index, []).append(dfb)
@@ -606,9 +602,6 @@ def _cb_configs_from_lifted(lifted: Dict[str, DataflowBuffer]):
                 members,
                 key=lambda dfb: dfb.tile[0] * dfb.tile[1],
             )
-        )
-        config.debug_names = tuple(
-            dict.fromkeys(name for dfb in members for name in dfb.debug_names)
         )
         max_pages = max(page_count(dfb) for dfb in members)
         config.shape = (1, max_pages)

@@ -16,6 +16,13 @@ python examples/elementwise-tutorial/step_4_multinode_grid_full.py --no-ttl-maxi
 
 See the [full compiler options reference](reference/compiler-options.md) for all decorator parameters, `CompilerOptions` flags with their MLIR pass mappings, environment variables, and `ttlang-opt` pass options.
 
+## Program L1 Layout
+
+Operations default to the uniform program-image layout. Large fused kernels may
+opt into per-core image frontiers with
+`@ttl.operation(program_l1_layout="per_core")`; this also requires
+`TT_METAL_PER_CORE_PROGRAM_SIZE` in the process environment.
+
 ## Print Debugging
 
 Use `print()` inside kernel code to emit device debug prints. Enable at runtime with `TT_METAL_DPRINT_CORES`:

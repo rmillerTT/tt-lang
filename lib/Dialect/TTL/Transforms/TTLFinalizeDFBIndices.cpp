@@ -6,24 +6,8 @@
 // TTL Finalize DFB Indices
 //===----------------------------------------------------------------------===//
 //
-// Module-level pass that runs after all DFB-creating passes. Reuses
-// compiler-created DFBs within exact CircularBufferType partitions and
-// balanced user DFBs local to one kernel thread. Explicit reset boundaries
-// additionally compact each first-use epoch into an independent physical
-// index space. The pass then computes the true DFB count, updates
-// ttl.base_cta_index on every function, and publishes the final index
-// assignment for the Python runtime.
-//
-// A logical DFB is one cb_index, bound by one bind_cb per kernel thread that
-// touches it. The same physical CB index has shared pages_received /
-// pages_acked counters and per-RISC read/write pointers, so two logical DFBs
-// may share an index only when:
-//   - both have the same producer thread and the same consumer thread;
-//     user DFBs additionally require producer == consumer,
-//   - their per-thread lifetimes are disjoint in both threads' program order,
-//   - compiler DFBs have the same complete CB type; user DFBs have the same
-//     page type and use a slot sized to their largest member.
-// User and compiler DFBs never share a physical index within one epoch.
+// Reuse compatible DFBs with disjoint balanced lifetimes, then compact each
+// reset epoch. Shared indices preserve thread roles, ring geometry, and type.
 //
 //===----------------------------------------------------------------------===//
 
@@ -59,14 +43,8 @@ namespace mlir::tt::ttl {
 
 namespace {
 
-/// Closed [start, end] lifetime of a logical DFB within one kernel thread,
-/// expressed in the program order of the innermost block that contains every
-/// one of its touches. A buffer used only in the early half of a loop body is
-/// dead in the late half of every iteration, so measuring it against the whole
-/// loop -- the only thing top-level order can say -- throws away most of the
-/// reuse in a program whose work is inside loops. Balance is what makes the
-/// finer measurement legal: a buffer that ends each iteration drained is dead
-/// across the back-edge too.
+/// Closed lifetime in the innermost block containing every touch.
+/// Balanced buffers are also dead across loop back-edges.
 struct ThreadInterval {
   Block *block = nullptr;
   int64_t start = 0;
@@ -94,10 +72,7 @@ struct LogicalDFB {
   bool eligible = true;
   bool crossThread = false;
   bool externUse = false;
-  /// Kernel threads that call an extern on this DFB. The call's enclosing
-  /// func.func carries ttl.kernel_thread, so the side of the handoff that
-  /// happens inside foreign code still has a known thread even when no
-  /// TT-Lang flow control names it.
+  /// Kernel threads whose synchronous extern calls touch this DFB.
   SmallVector<func::FuncOp, 2> externThreads;
   StringRef refusal;
   int64_t finalIndex = -1;
@@ -106,10 +81,7 @@ struct LogicalDFB {
   llvm::SmallDenseMap<int64_t, Operation *, 4> epochRepresentative;
   bool pinnedAcrossReset = false;
 
-  /// Per-block tallies of the four flow-control operations. A block that
-  /// waits more often than it pops, or reserves more often than it pushes,
-  /// ends with pages still held, and a later occupant of the same physical
-  /// index would inherit a ring that is neither empty nor aligned.
+  /// Flow-control tallies proving that each block leaves the ring drained.
   struct BlockTally {
     int64_t reserves = 0;
     int64_t pushes = 0;
@@ -130,8 +102,8 @@ struct LogicalDFB {
 
 enum class ResetControlFlow { Linear, Cyclic };
 
-constexpr llvm::StringLiteral kDFBResetPreservedIndicesAttrName(
-    "ttl.dfb_reset_preserved_indices");
+constexpr llvm::StringLiteral
+    kDFBResetPreservedIndicesAttrName("ttl.dfb_reset_preserved_indices");
 
 enum class HardwareDataFormat : int64_t {
   Float32 = 0,
@@ -450,8 +422,7 @@ struct TTLFinalizeDFBIndicesPass
 
     SmallVector<SmallVector<int64_t>> preservedByResetOrdinal(
         resetCount.value_or(0));
-    SmallVector<bool> initializedPreserveOrdinal(resetCount.value_or(0),
-                                                 false);
+    SmallVector<bool> initializedPreserveOrdinal(resetCount.value_or(0), false);
     llvm::DenseSet<int64_t> preservedLogicalIndices;
     for (func::FuncOp func : moduleOp.getOps<func::FuncOp>()) {
       auto callsIt = resetCallsByFunction.find(func.getOperation());
@@ -463,8 +434,7 @@ struct TTLFinalizeDFBIndicesPass
         SmallVector<int64_t> preserved;
         for (Value operand : call.getArgOperands()) {
           if (!isa<CircularBufferType>(operand.getType())) {
-            call.emitError(
-                "preserve operands must be dataflow buffers");
+            call.emitError("preserve operands must be dataflow buffers");
             invalidResetContract = true;
             continue;
           }
@@ -593,12 +563,8 @@ struct TTLFinalizeDFBIndicesPass
           dfb.epochRepresentative.try_emplace(epoch, op);
         }
       };
-
-      // Pipe destinations are slot-addressed (block_count == sender count)
-      // and pipe sends read asynchronously, so pipe-attached DFBs keep
-      // dedicated indices.
-      // A DFB participates in a pipe through a ttl.copy whose other operand
-      // is a pipe, or through pipe_recv guards.
+      // Pipe DFBs keep dedicated slots because sends read asynchronously.
+      // Detect them through pipe users, copy operands, and receive guards.
       auto isPipeOp = [](Operation *op) {
         if (op->getName().getStringRef().contains("pipe")) {
           return true;
@@ -634,21 +600,9 @@ struct TTLFinalizeDFBIndicesPass
           continue;
         }
         recordTouch(user);
-        // A direct DFB operand to foreign code may reserve, wait, push, pop,
-        // or retain pages, and OpaqueCallOp carries no memory effects or
-        // producer/consumer role metadata of its own. It is still not opaque
-        // in the way that matters here. The call sits inside a func.func whose
-        // ttl.kernel_thread names the thread it runs on -- the same attribute
-        // every role is derived from -- and the reserve/push and wait/pop
-        // pairs that bracket it in that thread still tally. Under
-        // TTL_DFB_REUSE_EXTERN the call is therefore recorded rather than
-        // treated as a veto: the eligibility loop below admits it only when
-        // TT-Lang flow control on both sides is present and balanced, which
-        // pins the ring pointers regardless of what the callee did to the
-        // pages in between. An extern that advances the pointers itself
-        // breaks that tally and is refused, and an extern on a DFB with no
-        // TT-Lang flow control at all has nothing to prove balance with and
-        // is refused too.
+        // Foreign calls lack role effects, so record rather than veto them.
+        // Eligibility still requires balanced TT-Lang flow control around the
+        // call; pointer-changing or unbracketed externs fail that check.
         if (isa<OpaqueCallOp>(user)) {
           dfb.externUse = true;
           if (func && !llvm::is_contained(dfb.externThreads, func)) {
@@ -751,27 +705,8 @@ struct TTLFinalizeDFBIndicesPass
       return;
     }
 
-    // User DFBs enter the arena when one kernel thread both produces and
-    // consumes them, and -- under TTL_DFB_REUSE_CROSS_THREAD -- when a
-    // producer thread and a distinct consumer thread hand pages between them
-    // in a balanced way.
-    //
-    // The conservative reading is that static operation order cannot prove
-    // that independently executing RISCs have drained a synchronization
-    // channel. What it can prove is the weaker property that actually
-    // matters. Two logical DFBs sharing an index have, by the class key, the
-    // same producer thread and the same consumer thread, and here also the
-    // same complete ring geometry. If the earlier one is balanced -- every
-    // page it reserves is pushed and every page it waits on is popped in the
-    // block that acquired it -- then the producer's write pointer and the
-    // consumer's read pointer each advance by the same number of pages, so
-    // both reach the successor at the same ring offset, and the shared
-    // received/acked counters settle equal. Skew between the two RISCs is
-    // then harmless rather than unproven: the successor's reserve blocks
-    // until the predecessor's pages are acked, and the FIFO hands the
-    // consumer the predecessor's remaining pages before any of the
-    // successor's. What is genuinely unsound is an unbalanced buffer, which
-    // leaves a page held, and that is exactly what `balanced()` refuses.
+    // Reuse requires matching thread roles and balanced ring advancement.
+    // Cross-thread reuse is separately opt-in.
     bool crossThreadReuse =
         std::getenv("TTL_DFB_REUSE_CROSS_THREAD") != nullptr;
     bool externPaired = std::getenv("TTL_DFB_REUSE_EXTERN_PAIRED") != nullptr;
@@ -779,22 +714,8 @@ struct TTLFinalizeDFBIndicesPass
       if (dfb.firstUseEpoch == std::numeric_limits<int64_t>::max()) {
         dfb.firstUseEpoch = 0;
       }
-      // An extern that carries one side -- or both sides -- of a handoff
-      // leaves that role unnamed in the IR, but not unknown: the call sits in
-      // a func.func whose ttl.kernel_thread says which RISC it runs on. Fill
-      // the missing role from there, so the buffer joins a class keyed by the
-      // threads that really touch it.
-      //
-      // The soundness argument is the balance argument one step out. An
-      // ttl.opaque_call is synchronous within its thread, so two calls in one
-      // thread cannot overlap, and the interval machinery below already keeps
-      // their lifetimes disjoint. What the compiler cannot verify is that the
-      // callee pushes as many pages as it pops. It does not have to: an extern
-      // that left the ring misaligned would desynchronize its own next
-      // invocation, so self-consistency across iterations is a property the
-      // callee already must have. Whatever TT-Lang flow control does exist is
-      // still checked with `balanced()`, and the successor's reserve blocks
-      // until the predecessor's pages are acked exactly as before.
+      // Infer unnamed extern roles from their kernel thread. Synchronous calls
+      // retain interval ordering; visible TT-Lang flow control must balance.
       if (externPaired && dfb.externUse && !dfb.compilerAllocated &&
           !dfb.externThreads.empty() && dfb.balanced()) {
         if (!dfb.producer) {
@@ -816,11 +737,7 @@ struct TTLFinalizeDFBIndicesPass
         continue;
       }
       if (dfb.externUse && !dfb.compilerAllocated) {
-        // The extern's own accesses are invisible, so the only evidence that
-        // the ring is left empty and aligned is the TT-Lang flow control
-        // around it. Demand the full pair on both sides and a clean tally;
-        // an empty tally would satisfy `balanced()` vacuously and prove
-        // nothing, so require that the buffer was actually driven from IR.
+        // Invisible extern accesses require balanced, nonempty TT-Lang flow.
         if (dfb.tallies.empty() || !dfb.producer || !dfb.consumer ||
             !dfb.balanced()) {
           dfb.eligible = false;
@@ -857,10 +774,7 @@ struct TTLFinalizeDFBIndicesPass
         if (it == dfb.acquires.end() || orderIt == orders.end()) {
           continue;
         }
-        // The bind is hoisted to the function entry, so the buffer is not
-        // really live from there. A bind's use-list is not program ordered,
-        // and acquires may sit in different nested blocks, so project every
-        // acquire into the final interval block and use the earliest one.
+        // Start at the earliest acquire projected into the final interval.
         int64_t first = interval.end;
         for (Operation *acquire : it->second) {
           first =
@@ -874,8 +788,8 @@ struct TTLFinalizeDFBIndicesPass
     llvm::DenseSet<int64_t> unpackToDestFp32DFBs;
     bool fp32DestAcc = false;
     moduleOp->walk([&](func::FuncOp func) {
-      auto thread = func->getAttrOfType<ttkernel::ThreadTypeAttr>(
-          kKernelThreadAttrName);
+      auto thread =
+          func->getAttrOfType<ttkernel::ThreadTypeAttr>(kKernelThreadAttrName);
       if (!thread || thread.getValue() != ttkernel::ThreadType::Compute) {
         return;
       }
@@ -890,23 +804,14 @@ struct TTLFinalizeDFBIndicesPass
       }
     });
 
-    // Compiler DFBs are partitioned by the complete CircularBufferType. Their
-    // lowering may depend on the exact physical ring geometry; widening this
-    // to element type caused a silent global-attention regression. Balanced
-    // thread-local user DFBs may share different capacities with the same page
-    // type because the runtime sizes their arena slot to the largest member.
-    // `kind` separates user and compiler storage; the final field separates
-    // incompatible FP32 unpack routes.
+    // Compiler DFBs require exact ring types; user DFBs may share page types.
+    // Class kind separates compiler, cross-thread, and FP32 unpack storage.
     using ClassKey =
         std::tuple<Type, Operation *, Operation *, int64_t, int64_t>;
     llvm::MapVector<ClassKey, SmallVector<LogicalDFB *>> classes;
     for (auto &[idx, dfb] : dfbs) {
       if (dfb.eligible) {
-        // Cross-thread shares take the page type, like thread-local ones: the
-        // runtime sizes the slot to the largest member, and the placement
-        // loop below refuses any group whose ring would not wrap on a block
-        // boundary for every member. User and compiler slots remain separate
-        // within each epoch.
+        // User slots share page types and size to their largest member.
         Type storageType = dfb.compilerAllocated ? dfb.cbType : dfb.elemType;
         int64_t kind = static_cast<int64_t>(dfb.compilerAllocated) +
                        2 * static_cast<int64_t>(dfb.crossThread);
@@ -920,10 +825,8 @@ struct TTLFinalizeDFBIndicesPass
       }
     }
 
-    // Greedy interval coloring per class: walk by ascending producer start
-    // and place on the first slot whose members are all disjoint in both
-    // threads. A slot takes the lowest original index of its members, so
-    // indices only ever decrease and never collide with ineligible DFBs.
+    // Place each interval in the first nonconflicting slot in its class.
+    // Slots use their lowest original index, avoiding ineligible DFBs.
     SmallVector<SmallVector<LogicalDFB *>> slots;
     for (auto &[key, members] : classes) {
       llvm::sort(members, [](LogicalDFB *a, LogicalDFB *b) {
@@ -941,10 +844,8 @@ struct TTLFinalizeDFBIndicesPass
               })) {
             continue;
           }
-          // The physical ring is as long as the slot's largest member, and a
-          // block may not straddle the wrap: every member's block size has to
-          // divide that length, or a push after the wrap would land on a
-          // boundary its own arithmetic does not expect.
+          // Size the physical ring to its largest member. Every member's block
+          // must divide it so no block straddles the wrap.
           int64_t pages = dfb->totalPages();
           for (LogicalDFB *member : slots[s]) {
             pages = std::max(pages, member->totalPages());
@@ -1005,8 +906,8 @@ struct TTLFinalizeDFBIndicesPass
           return lhs < rhs;
         });
         usedIndices.erase(llvm::unique(usedIndices), usedIndices.end());
-        maxEpochLocalSlots = std::max(
-            maxEpochLocalSlots, static_cast<int64_t>(usedIndices.size()));
+        maxEpochLocalSlots = std::max(maxEpochLocalSlots,
+                                      static_cast<int64_t>(usedIndices.size()));
         DenseMap<int64_t, int64_t> rank;
         for (auto [i, index] : llvm::enumerate(usedIndices)) {
           rank[index] = static_cast<int64_t>(i);
@@ -1025,8 +926,7 @@ struct TTLFinalizeDFBIndicesPass
         return lhs->origIndex < rhs->origIndex;
       });
       for (auto [ordinal, dfb] : llvm::enumerate(pinnedDFBs)) {
-        dfb->finalIndex =
-            maxEpochLocalSlots + static_cast<int64_t>(ordinal);
+        dfb->finalIndex = maxEpochLocalSlots + static_cast<int64_t>(ordinal);
       }
     } else {
       // Compact to a dense index space (the runtime builds one CB descriptor
@@ -1073,12 +973,12 @@ struct TTLFinalizeDFBIndicesPass
           builder.getNamedAttr(
               "physical_index",
               builder.getI32IntegerAttr(static_cast<int32_t>(dfb.finalIndex))),
-          builder.getNamedAttr(
-              "epoch", builder.getI32IntegerAttr(
-                           static_cast<int32_t>(dfb.firstUseEpoch))),
-          builder.getNamedAttr(
-              "num_pages", builder.getI32IntegerAttr(
-                               static_cast<int32_t>(dfb.totalPages()))),
+          builder.getNamedAttr("epoch",
+                               builder.getI32IntegerAttr(
+                                   static_cast<int32_t>(dfb.firstUseEpoch))),
+          builder.getNamedAttr("num_pages",
+                               builder.getI32IntegerAttr(
+                                   static_cast<int32_t>(dfb.totalPages()))),
           builder.getNamedAttr("element_type", TypeAttr::get(dfb.elemType)),
           builder.getNamedAttr(
               "unpack_to_dest_fp32",
@@ -1089,10 +989,9 @@ struct TTLFinalizeDFBIndicesPass
           builder.getNamedAttr(
               "block_count",
               builder.getI32IntegerAttr(static_cast<int32_t>(dfb.blockCount))),
-          builder.getNamedAttr(
-              "elems_per_block",
-              builder.getI32IntegerAttr(
-                  static_cast<int32_t>(dfb.elemsPerBlock)))};
+          builder.getNamedAttr("elems_per_block",
+                               builder.getI32IntegerAttr(
+                                   static_cast<int32_t>(dfb.elemsPerBlock)))};
       if (dfb.addressScope) {
         attrs.push_back(
             builder.getNamedAttr("address_scope", dfb.addressScope));
@@ -1163,8 +1062,7 @@ struct TTLFinalizeDFBIndicesPass
           auto [it, inserted] =
               configs.try_emplace(logicalDFB->finalIndex, logicalDFB);
           if (!inserted) {
-            auto currentTileType =
-                cast<ttcore::TileType>(it->second->elemType);
+            auto currentTileType = cast<ttcore::TileType>(it->second->elemType);
             int64_t currentBytes =
                 it->second->totalPages() * currentTileType.getSizeBytes();
             int64_t candidateBytes =
@@ -1192,8 +1090,7 @@ struct TTLFinalizeDFBIndicesPass
       int64_t physicalSlotCount = 0;
       for (const auto &[idx, dfb] : dfbs) {
         (void)idx;
-        physicalSlotCount =
-            std::max(physicalSlotCount, dfb.finalIndex + 1);
+        physicalSlotCount = std::max(physicalSlotCount, dfb.finalIndex + 1);
       }
       SmallVector<Attribute> physicalConfigs;
       for (int64_t physicalIndex = 0; physicalIndex < physicalSlotCount;
@@ -1319,9 +1216,9 @@ struct TTLFinalizeDFBIndicesPass
       for (auto &[funcOperation, calls] : resetCallsByFunction) {
         if (hasCyclicResetDataflowBuffers) {
           for (auto [ordinal, call] : llvm::enumerate(calls)) {
-            appendConfiguration(call, (static_cast<int64_t>(ordinal) + 1) %
-                                          epochCount,
-                                preservedPhysicalByResetOrdinal[ordinal]);
+            appendConfiguration(
+                call, (static_cast<int64_t>(ordinal) + 1) % epochCount,
+                preservedPhysicalByResetOrdinal[ordinal]);
           }
         } else {
           for (auto [ordinal, call] : llvm::enumerate(calls)) {

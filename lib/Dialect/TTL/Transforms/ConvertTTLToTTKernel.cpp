@@ -1277,11 +1277,7 @@ struct OpaqueCallLowering : OpConversionPattern<OpaqueCallOp> {
         continue;
       }
 
-      // Tensor -> i32 DRAM buffer address via get_common_arg_val. The address
-      // is a per-invocation runtime arg (see kernel_runner
-      // common_runtime_args), so passing a tensor into func_args is cache-safe:
-      // a different tensor of the same shape/dtype reuses the compiled kernel
-      // but supplies its own address at runtime.
+      // Lower tensors to per-invocation DRAM addresses, preserving cache reuse.
       if (mlir::isa<RankedTensorType>(origTy)) {
         auto argIdx = getTensorFuncArgIndex(origArg);
         if (failed(argIdx)) {

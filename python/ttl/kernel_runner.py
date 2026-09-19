@@ -165,18 +165,9 @@ class ProgramRuntimeResources:
     )
     defines_by_thread: Dict[str, List[Tuple[str, str]]] = field(default_factory=dict)
     lifetimes: List[Any] = field(default_factory=list)
-    # Optional exact replacement for the whole-grid descriptors normally
-    # synthesized from ``cb_configs``.  This is deliberately a runtime-resource
-    # escape hatch: opaque fused programs can describe one CB id with multiple
-    # disjoint per-core descriptors while the compiler's static CB allocation
-    # model remains conservative.  ``run_kernel_on_device`` validates the
-    # replacement before it can bypass the default descriptor builder.
+    # Exact descriptor replacement for opaque fused programs. Validation
+    # requires disjoint per-core descriptors before bypassing the default.
     cb_descriptors_override: Optional[List[Any]] = None
-    # Optional capacity-only specialization for selected CB ids.  Each value
-    # is ``[(CoreRangeSet, num_pages), ...]`` and must partition the program
-    # grid.  Formats still come from the compiler-derived ``cb_configs``;
-    # unlisted ids retain their normal whole-grid descriptors.
-    cb_pages_by_core: Dict[int, List[Tuple[Any, int]]] = field(default_factory=dict)
 
 
 def _data_movement_thread_name(config: Any) -> str:
@@ -967,28 +958,8 @@ def validate_cb_descriptors_override(
             f"missing {missing_ids}"
         )
 
-    budget_bytes = _remaining_cb_budget(tensors)
     budgets_by_core = _remaining_cb_budgets_by_core(tensors, program_cores)
     if bytes_by_core:
-        peak_core, peak_bytes = max(
-            bytes_by_core.items(), key=lambda item: (item[1], item[0])
-        )
-        if os.environ.get("TTLANG_DUMP_CB_LAYOUT"):
-            print(
-                "TTLANG_CB_LAYOUT "
-                f"budget={budget_bytes} peak={peak_bytes} core={peak_core}"
-            )
-            for core, total in sorted(
-                bytes_by_core.items(), key=lambda item: item[1], reverse=True
-            )[:12]:
-                breakdown = ",".join(
-                    f"{cb_id}:{size}"
-                    for cb_id, size in sorted(claim_sizes_by_core[core])
-                )
-                print(
-                    f"TTLANG_CB_CORE core={core} bytes={total} "
-                    f"budget={budgets_by_core[core]} {breakdown}"
-                )
         overflow_core, overflow_bytes = max(
             bytes_by_core.items(),
             key=lambda item: (item[1] - budgets_by_core[item[0]], item[0]),
@@ -1060,136 +1031,6 @@ def _core_ranges_from_coordinates(coordinates: set[Tuple[int, int]]):
     return ttnn.CoreRangeSet(rectangles)
 
 
-def build_cb_descriptors_by_core(
-    tensors: List[Any],
-    cb_configs: List[Any],
-    core_ranges: Any,
-    pages_by_core: Dict[int, List[Tuple[Any, int]]],
-) -> List[Any]:
-    """Build a full descriptor table with selected per-core capacities."""
-    _ensure_ttnn()
-    if ttnn is None:
-        raise RuntimeError("ttnn is not available")
-
-    geometries = [cb_geometry(i, cb) for i, cb in enumerate(cb_configs)]
-    program_cores = _core_range_coordinates(core_ranges, label="program core ranges")
-    specialized = {}
-    for raw_index, entries in dict(pages_by_core).items():
-        try:
-            index = int(raw_index)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"invalid per-core CB id {raw_index!r}") from exc
-        if index < 0 or index >= len(geometries):
-            raise ValueError(
-                f"per-core CB id {index} is outside [0, {len(geometries)})"
-            )
-        if index in specialized:
-            raise ValueError(f"duplicate per-core CB id {index}")
-        try:
-            entries = list(entries)
-        except TypeError as exc:
-            raise ValueError(
-                f"per-core CB[{index}] configuration must be iterable"
-            ) from exc
-        if not entries:
-            raise ValueError(f"per-core CB[{index}] configuration is empty")
-
-        covered = set()
-        configured_pages = []
-        pages_for_core = {}
-        for entry_index, entry in enumerate(entries):
-            try:
-                entry_ranges, raw_pages = entry
-                pages = int(raw_pages)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"per-core CB[{index}] entry {entry_index} must be "
-                    "(CoreRangeSet, positive pages)"
-                ) from exc
-            if pages <= 0:
-                raise ValueError(
-                    f"per-core CB[{index}] entry {entry_index} has "
-                    f"non-positive page count {pages}"
-                )
-            entry_cores = _core_range_coordinates(
-                entry_ranges,
-                label=f"per-core CB[{index}] entry {entry_index}",
-            )
-            outside = entry_cores - program_cores
-            overlap = entry_cores & covered
-            if outside:
-                raise ValueError(
-                    f"per-core CB[{index}] claims cores outside the program "
-                    f"grid: {sorted(outside)}"
-                )
-            if overlap:
-                raise ValueError(
-                    f"per-core CB[{index}] entries overlap on " f"{sorted(overlap)}"
-                )
-            covered.update(entry_cores)
-            configured_pages.append(pages)
-            pages_for_core.update({core: pages for core in entry_cores})
-        if covered != program_cores:
-            raise ValueError(
-                f"per-core CB[{index}] must cover the whole program grid; "
-                f"missing {sorted(program_cores - covered)}"
-            )
-        if max(configured_pages) != geometries[index].num_pages:
-            raise ValueError(
-                f"per-core CB[{index}] must preserve the compiler-derived "
-                f"maximum of {geometries[index].num_pages} pages; got "
-                f"{max(configured_pages)}"
-            )
-        specialized[index] = pages_for_core
-
-    # TT-Metal keeps one allocation cursor per descriptor CoreRange. A single
-    # whole-grid descriptor overlaps every later specialized subset and makes
-    # that whole-grid cursor conservatively accumulate all subset capacities.
-    # Refine every descriptor onto one common disjoint partition instead.
-    # Uniform descriptors still receive identical sizes in identical order on
-    # every partition, preserving the common bases required by remote users.
-    specialized_indices = tuple(specialized)
-    cores_by_signature = {}
-    for core in sorted(program_cores):
-        signature = tuple(specialized[index][core] for index in specialized_indices)
-        cores_by_signature.setdefault(signature, set()).add(core)
-    partitions = [
-        (signature, _core_ranges_from_coordinates(coordinates))
-        for signature, coordinates in cores_by_signature.items()
-    ]
-
-    descriptors = []
-    for index, geometry in enumerate(geometries):
-        if index in specialized:
-            continue
-        for _, partition_ranges in partitions:
-            descriptors.append(
-                _cb_descriptor(
-                    index,
-                    geometry,
-                    geometry.total_size,
-                    partition_ranges,
-                )
-            )
-    for signature_position, index in enumerate(specialized_indices):
-        geometry = geometries[index]
-        for signature, partition_ranges in partitions:
-            descriptors.append(
-                _cb_descriptor(
-                    index,
-                    geometry,
-                    signature[signature_position] * geometry.page_size,
-                    partition_ranges,
-                )
-            )
-    return validate_cb_descriptors_override(
-        descriptors=descriptors,
-        program_core_ranges=core_ranges,
-        tensors=tensors,
-        num_cbs=len(cb_configs),
-    )
-
-
 def _build_compiler_cb_descriptors_by_core(
     tensors: List[Any],
     cb_configs: List[Any],
@@ -1249,8 +1090,8 @@ def _build_compiler_cb_descriptors_by_core(
             )
 
     descriptors = []
-    legacy_indices = sorted(
-        index for index, scope in scopes_by_index.items() if scope == "legacy"
+    default_indices = sorted(
+        index for index, scope in scopes_by_index.items() if scope == "default"
     )
     # Allocate wider uniform domains first so a narrow earlier allocation
     # cannot force padding onto every participant of a later remote DFB.
@@ -1284,7 +1125,7 @@ def _build_compiler_cb_descriptors_by_core(
         ]
     )
 
-    for index in legacy_indices:
+    for index in default_indices:
         geometry = geometries[index]
         descriptors.append(
             _cb_descriptor(
@@ -1322,10 +1163,8 @@ def _build_compiler_cb_descriptors_by_core(
             pages = by_index.get(index)
             if pages is None:
                 continue
-            # Local DFB addresses are never observed from another core. Keep
-            # their descriptors singleton-core so a core with a small
-            # specialized program does not inherit the program-local L1 base
-            # of an unrelated core that happens to have the same DFB plan.
+            # Local DFB addresses are unobserved remotely, so place each core
+            # independently.
             for core in sorted(coords):
                 descriptors.append(
                     _cb_descriptor(
@@ -1484,17 +1323,6 @@ def run_kernel_on_device(
         num_pipe_global_semaphores=num_pipe_global_semaphores,
         num_reset_sync_words=num_reset_sync_words,
     )
-    if os.environ.get("TTLANG_DUMP_CB_LAYOUT"):
-        pipe_budgets = _remaining_cb_budgets_by_core(
-            tensors, _core_range_coordinates(core_ranges, label="program core ranges")
-        )
-        print(
-            "TTLANG_PIPE_RESOURCES "
-            f"scratch_bytes_per_core={pipe_sram_scratch_bytes} "
-            f"global_semaphores={num_pipe_global_semaphores} "
-            f"reset_sync_words={num_reset_sync_words} "
-            f"remaining_l1_min={min(pipe_budgets.values())}"
-        )
     if pipe_global_semaphore_lifetime is not None:
         pipe_global_semaphore_lifetime[:] = pipe_runtime_resources.global_semaphores
 
@@ -1510,19 +1338,11 @@ def run_kernel_on_device(
                 "runtime_resource_factory must return ProgramRuntimeResources, "
                 f"got {type(program_resources).__name__}"
             )
-    if os.environ.get("TTLANG_DUMP_CB_LAYOUT"):
-        program_budgets = _remaining_cb_budgets_by_core(
-            tensors, _core_range_coordinates(core_ranges, label="program core ranges")
-        )
-        print(
-            "TTLANG_PROGRAM_RESOURCES "
-            f"remaining_l1_min={min(program_budgets.values())}"
-        )
     if runtime_resource_lifetime is not None:
         runtime_resource_lifetime[:] = program_resources.lifetimes
 
     compiler_dfb_plan_active = any(
-        config.address_scope != "legacy"
+        config.address_scope != "default"
         for group in _compiler_dfb_groups
         for config in group.configs
     )
@@ -1530,10 +1350,7 @@ def run_kernel_on_device(
     if (
         any(isinstance(cb, EpochPhysicalDFBConfig) for cb in cb_configs)
         or compiler_dfb_plan_active
-    ) and (
-        program_resources.cb_descriptors_override is not None
-        or program_resources.cb_pages_by_core
-    ):
+    ) and program_resources.cb_descriptors_override is not None:
         raise ValueError(
             "ProgramRuntimeResources cannot override compiler-selected "
             "dataflow-buffer descriptors"
@@ -1557,17 +1374,7 @@ def run_kernel_on_device(
         _per_core_tensor_addresses=per_core_tensor_addresses,
     )
 
-    # Build CB descriptors, unless this operation supplied an exact per-core
-    # replacement.  Keep the bypass here (after resource construction) so all
-    # other operations retain the compiler-derived whole-grid behavior.
-    if (
-        program_resources.cb_descriptors_override is not None
-        and program_resources.cb_pages_by_core
-    ):
-        raise ValueError(
-            "ProgramRuntimeResources cannot set both cb_descriptors_override "
-            "and cb_pages_by_core"
-        )
+    # Build compiler descriptors unless an opaque operation replaces them.
     if compiler_dfb_plan_active:
         cb_descriptors = _build_compiler_cb_descriptors_by_core(
             tensors=tensors,
@@ -1581,13 +1388,6 @@ def run_kernel_on_device(
             program_core_ranges=core_ranges,
             tensors=tensors,
             num_cbs=len(cb_configs),
-        )
-    elif program_resources.cb_pages_by_core:
-        cb_descriptors = build_cb_descriptors_by_core(
-            tensors=tensors,
-            cb_configs=cb_configs,
-            core_ranges=core_ranges,
-            pages_by_core=program_resources.cb_pages_by_core,
         )
     else:
         cb_descriptors = build_cb_descriptors(
@@ -2042,7 +1842,6 @@ __all__ = [
     "build_tensor_accessor_args",
     "build_kernel_descriptors",
     "build_cb_descriptors",
-    "build_cb_descriptors_by_core",
     "validate_cb_descriptors_override",
     "cb_geometry",
     "build_pipe_sram_scratch_tensors",

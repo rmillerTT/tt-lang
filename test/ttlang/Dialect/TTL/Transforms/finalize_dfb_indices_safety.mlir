@@ -43,13 +43,11 @@ module {
 
 // -----
 
-// Operations in a loop body project to the loop operation. DFBs that appear
-// sequential in one static iteration therefore overlap across the backedge.
-// CHECK-LABEL: func.func @loop_backedge_is_live
-// CHECK-SAME: ttl.base_cta_index = 2 : i32
-// CHECK: ttl.bind_cb{cb_index = 0,
-// CHECK: ttl.bind_cb{cb_index = 1,
-func.func @loop_backedge_is_live()
+// Balanced DFB lifetimes may reuse one slot across loop iterations.
+// CHECK-LABEL: func.func @loop_balanced_lifetimes_reuse
+// CHECK-SAME: ttl.base_cta_index = 1 : i32
+// CHECK-COUNT-2: ttl.bind_cb{cb_index = 0,
+func.func @loop_balanced_lifetimes_reuse()
     attributes {ttl.kernel_thread = #ttkernel.thread<compute>, ttl.base_cta_index = 2 : i32} {
   %cb0 = ttl.bind_cb {cb_index = 0, block_count = 2} : !ttl.cb<[1, 1], !ttcore.tile<32x32, bf16>, 2>
   %cb1 = ttl.bind_cb {cb_index = 1, block_count = 2} : !ttl.cb<[1, 1], !ttcore.tile<32x32, bf16>, 2>

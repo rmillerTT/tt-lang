@@ -92,8 +92,6 @@ from .dtype_utils import (
     tile_bytes_from_dtype,
     torch_dtype_to_ttnn_datatype,
 )
-from .cb_table import record_dfb_name, resolve_cb_names, write_cb_table
-from . import hang
 from .kernel_runner import (
     KernelSpec,
     get_min_remaining_l1_for_device,
@@ -563,7 +561,6 @@ class CompiledTTNNKernel:
         kernel_tensor_indices,
         kernel_core_ranges=None,
         cb_configs=None,
-        cb_names=None,
         program_hash=None,
         program_l1_layout="uniform",
         source_lines=None,
@@ -594,8 +591,6 @@ class CompiledTTNNKernel:
                 each specialized clone is dispatched only to its own core; None
                 entries fall back to the whole-grid core_ranges.
             cb_configs: List of (shape, block_count) tuples for each CB, indexed by cb_index
-            cb_names: Dict mapping final CB index to the logical DFB names that
-                landed on it, including the ones reuse coloring merged away
             program_hash: Hash for tt-metal program cache
             source_lines: Source code lines for auto-profiling reports (deprecated)
             all_source_lines: Dict mapping kernel name to source lines
@@ -620,7 +615,6 @@ class CompiledTTNNKernel:
         self.kernel_tensor_indices = kernel_tensor_indices
         self.kernel_core_ranges = kernel_core_ranges or [None] * len(kernel_paths)
         self.cb_configs = cb_configs or []
-        self.cb_names = cb_names or {}
         self.program_hash = program_hash
         self.program_l1_layout = program_l1_layout
         self.source_lines = source_lines
@@ -637,7 +631,6 @@ class CompiledTTNNKernel:
         self._compiler_dfb_groups = tuple(_compiler_dfb_groups or ())
         self._runtime_resource_lifetime = []
         self.opaque_include_paths = opaque_include_paths or []
-        self._hang_key = hang.program_key(kernel_paths) if kernel_paths else ""
 
     def __call__(self, *args):
         """Execute the kernel with the given tensors."""
@@ -674,8 +667,6 @@ class CompiledTTNNKernel:
                 ),
             )
             kernel_specs.append(spec)
-
-        hang.note_launch(self._hang_key)
 
         # Use shared kernel execution logic.
         return run_kernel_on_device(
@@ -717,7 +708,6 @@ class _CompiledTTNNKernelTemplate:
         ]
         self.kernel_core_ranges = list(kernel.kernel_core_ranges)
         self.cb_configs = [self._detach_cb(config) for config in kernel.cb_configs]
-        self.cb_names = dict(kernel.cb_names)
         self.program_hash = kernel.program_hash
         self.program_l1_layout = kernel.program_l1_layout
         self.source_lines = kernel.source_lines
@@ -757,7 +747,6 @@ class _CompiledTTNNKernelTemplate:
             ],
             kernel_core_ranges=list(self.kernel_core_ranges),
             cb_configs=list(self.cb_configs),
-            cb_names=dict(self.cb_names),
             program_hash=self.program_hash,
             program_l1_layout=self.program_l1_layout,
             source_lines=self.source_lines,
@@ -1009,7 +998,6 @@ def _compile_ttnn_kernel(
     num_outs,
     thread_tensor_indices,
     cb_configs=None,
-    cb_names=None,
     program_hash=None,
     program_l1_layout: str = "uniform",
     fp32_dest_acc_en: Optional[bool] = None,
@@ -1298,7 +1286,6 @@ def _compile_ttnn_kernel(
         kernel_tensor_indices=kernel_tensor_indices,
         kernel_core_ranges=kernel_core_ranges,
         cb_configs=cb_configs,
-        cb_names=cb_names,
         program_hash=program_hash,
         program_l1_layout=program_l1_layout,
         source_lines=source_lines,
@@ -1314,11 +1301,6 @@ def _compile_ttnn_kernel(
         runtime_dfb_reconfiguration=runtime_dfb_reconfiguration,
         _compiler_dfb_groups=_compiler_dfb_groups,
     )
-
-    # Recorded at compile time, not per launch: the hang collector needs the
-    # generated source names to find kernel ELFs and the grid to know which
-    # cores to sample.
-    hang.note_program(program_hash, kernel_paths, core_ranges)
 
     if verbose:
         print(f"\nCompiled kernel ready (compiled {len(kernel_paths)} threads)")
@@ -1476,11 +1458,10 @@ def _collect_cb_configs(threads):
         closure = getattr(wrapped, "__closure__", None) if wrapped else None
         if not closure:
             continue
-        for name, cell in zip(wrapped.__code__.co_freevars, closure):
+        for cell in closure:
             val = cell.cell_contents
             if isinstance(val, DataflowBuffer):
                 cb_configs_dict[val._cb_index] = val
-                record_dfb_name(val, name)
 
     if not cb_configs_dict:
         return []
@@ -1656,7 +1637,7 @@ def _extract_compiler_dfb_groups(module):
                     "per-core DFB configs require unique non-negative indices "
                     "and positive page counts"
                 )
-            if address_scope not in ("legacy", "local", "remote_uniform"):
+            if address_scope not in ("default", "local", "remote_uniform"):
                 raise ValueError(
                     f"unknown per-core DFB address scope {address_scope!r}"
                 )
@@ -2162,11 +2143,7 @@ def _lower_program_to_kernel(
     # TTLANG_DEBUG_LOCATIONS only controls whether locations are printed in MLIR output
     print_debug_locations = os.environ.get("TTLANG_DEBUG_LOCATIONS", "0") == "1"
 
-    # Some large composed modules expose latent thread-safety bugs in
-    # function-pass implementations. Keep normal parallel compilation as the
-    # default, but provide the standard MLIR single-threaded escape hatch for
-    # reducing and unblocking those compiler bugs without enabling verbose IR
-    # printing.
+    # Preserve MLIR's single-threaded escape hatch for unsafe function passes.
     ctx = _make_mlir_context()
     loc = Location.unknown(ctx)
     with ctx, loc:
@@ -2443,8 +2420,6 @@ def _lower_program_to_kernel(
             first_thread = next(iter(all_source_lines.keys()))
             profile_source_lines = all_source_lines[first_thread]
 
-        # Resolve names before the coloring drops the DFBs it merges away.
-        cb_names = resolve_cb_names(cb_configs, _dfb_index_map(module) or {})
         # Apply user-DFB index coloring before merging compiler-owned slots.
         cb_configs = _apply_dfb_index_map(cb_configs, module)
         compiler_allocated_dfbs = _extract_compiler_allocated_dfbs(module)
@@ -2454,12 +2429,6 @@ def _lower_program_to_kernel(
             cb_configs, epoch_physical_configs
         )
         compiler_dfb_groups = _extract_compiler_dfb_groups(module)
-        write_cb_table(
-            cb_configs,
-            cb_names,
-            program_hash=program_hash,
-            source_file=kernel_source_file,
-        )
         pipe_sync_semaphore_count = _extract_pipe_sync_semaphore_count(module)
         if pipe_sync_semaphore_count is None:
             raise RuntimeError(
@@ -2480,7 +2449,6 @@ def _lower_program_to_kernel(
             num_outs,
             thread_tensor_indices,
             cb_configs,
-            cb_names=cb_names,
             program_hash=program_hash,
             program_l1_layout=program_l1_layout,
             fp32_dest_acc_en=fp32_dest_acc_en,
