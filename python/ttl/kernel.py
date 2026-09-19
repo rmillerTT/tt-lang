@@ -571,6 +571,11 @@ def _bind_kernel_declarations(
     logical_kernels: Mapping[str, Kernel], operation_identity: str
 ) -> None:
     """Bind uniquely named declarations during operation registration."""
+    logical_kernels = {
+        name: kernel
+        for name, kernel in logical_kernels.items()
+        if _selector_implicit_role(kernel) is None
+    }
     source_names = {}
     for name, kernel in logical_kernels.items():
         previous_name = source_names.get(id(kernel))
