@@ -219,7 +219,9 @@ Each DFB declares the address requirement imposed by its users through
 default `LOCAL` scope permits different L1 addresses on different nodes. Use
 `REMOTE_UNIFORM` when code reads a DFB's local address and uses it as a remote
 NoC address: the runtime then creates one descriptor at the same L1 address on
-every allocated node. This scope changes backing-storage placement only. It
+every allocated node, allocates it before every local-scope descriptor so it
+costs no padding, and never splits it per core; a program whose remote-uniform
+and local storage do not fit fails at descriptor construction. This scope changes backing-storage placement only. It
 does not change the DFB protocol, physical-index reuse, capacity, or
 synchronization. A `remote_uniform` DFB cannot share backing storage with a
 different physical DFB index because that sharing would make its address depend

@@ -37,6 +37,7 @@ from ttl import (
     kernel_runner,
 )
 from ttl.dataflow_buffer import (
+    DFBAddressScope,
     DFBConfigurationEpoch,
     DFBReconfigurationPlan,
     DFBStorageSegment,
@@ -1985,7 +1986,8 @@ def test_plan_runtime_resources_requires_each_external_fabric_claim():
 
 
 def test_runtime_resource_fingerprint_is_stable_across_python_hash_seeds():
-    script = textwrap.dedent("""
+    script = textwrap.dedent(
+        """
         from ttl import CoreRuntimeArgs, KernelDefine, KernelKind
         from ttl import KernelRuntimeResources, ProgramRuntimeResources
         from ttl import kernel_runner
@@ -2025,7 +2027,8 @@ def test_runtime_resource_fingerprint_is_stable_across_python_hash_seeds():
             first_free_semaphore_id=0,
         )
         print(plan.structural_fingerprint)
-        """)
+        """
+    )
     fingerprints = []
     for hash_seed in ("1", "937"):
         environment = dict(os.environ)
@@ -6951,6 +6954,77 @@ def test_static_dfb_descriptors_split_over_budget_core_when_enabled(monkeypatch)
         1: {(1, 0), (2, 0)},
         2: {(0, 0), (2, 0)},
     }
+
+
+def _remote_uniform_config(physical_index, num_tiles, allocation_nodes):
+    return PhysicalDFBConfig(
+        physical_index,
+        num_tiles,
+        "bfloat16",
+        1,
+        64,
+        (1, 32),
+        allocation_nodes=allocation_nodes,
+        address_scope=DFBAddressScope.REMOTE_UNIFORM,
+    )
+
+
+# A remote-uniform descriptor is placed before every local descriptor, so it
+# costs no padding, and it is never split even when splitting is enabled.
+def test_remote_uniform_static_dfb_is_placed_first_and_never_split(monkeypatch):
+    monkeypatch.setattr(kernel_runner, "ttnn", _FakeTTNN())
+    monkeypatch.setattr(kernel_runner, "DEFAULT_L1_CB_BUDGET_BYTES", 12288)
+    monkeypatch.setattr(kernel_runner, "_STATIC_DFB_PACKING_EXACT_PLAN_LIMIT", 2)
+    full_grid = _FakeExplicitCoreRanges((0, 0), (2, 0))
+    all_nodes = ((0, 0), (1, 0), (2, 0))
+    configs = _coupled_static_dfb_configs() + [_remote_uniform_config(3, 32, all_nodes)]
+
+    descriptors = kernel_runner.build_cb_descriptors(
+        tensors=[_FakeTensorWithoutDevice()],
+        cb_configs=configs,
+        core_ranges=full_grid,
+        kernel_specs=[_specialized_spec(full_grid, None)],
+        unsafe_split_static_dfb_descriptors=True,
+    )
+
+    assert descriptors[0].format_descriptors[0].buffer_index == 3
+    assert _descriptor_cores(descriptors[0]) == set(all_nodes)
+    assert len(descriptors) == 6
+    uniform_descriptors = [
+        descriptor
+        for descriptor in descriptors
+        if descriptor.format_descriptors[0].buffer_index == 3
+    ]
+    assert len(uniform_descriptors) == 1
+
+
+# A core whose remote-uniform and local storage exceed its budget fails instead
+# of trading the uniform address for a per-core split.
+def test_remote_uniform_static_dfb_overflow_raises_instead_of_splitting(monkeypatch):
+    monkeypatch.setattr(kernel_runner, "ttnn", _FakeTTNN())
+    monkeypatch.setattr(kernel_runner, "DEFAULT_L1_CB_BUDGET_BYTES", 10240)
+    full_grid = _FakeExplicitCoreRanges((0, 0), (1, 0))
+    configs = [
+        _remote_uniform_config(0, 128, ((0, 0), (1, 0))),
+        PhysicalDFBConfig(
+            1,
+            64,
+            "bfloat16",
+            1,
+            64,
+            (1, 32),
+            allocation_nodes=((0, 0),),
+        ),
+    ]
+
+    with pytest.raises(ValueError, match="No static DFB descriptor order fits"):
+        kernel_runner.build_cb_descriptors(
+            tensors=[_FakeTensorWithoutDevice()],
+            cb_configs=configs,
+            core_ranges=full_grid,
+            kernel_specs=[_specialized_spec(full_grid, None)],
+            unsafe_split_static_dfb_descriptors=True,
+        )
 
 
 # Splitting cannot satisfy a core whose own DFB storage exceeds its budget.
