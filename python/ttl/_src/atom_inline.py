@@ -904,10 +904,11 @@ def _literal_node(
     suffix: str,
     name_hint: str,
 ) -> ast.expr:
-    if value is ScalarType or isinstance(value, ScalarType):
+    if value is ScalarType or isinstance(value, (ScalarType, KernelKind)):
         type_name = "class" if value is ScalarType else value.name.lower()
+        category = "kernel_kind" if isinstance(value, KernelKind) else "scalar_type"
         fresh_name = _fresh_name(
-            f"{name_hint}__scalar_type_{type_name}", suffix, reserved_names
+            f"{name_hint}__{category}_{type_name}", suffix, reserved_names
         )
         scope[fresh_name] = value
         return ast.Name(id=fresh_name, ctx=ast.Load())

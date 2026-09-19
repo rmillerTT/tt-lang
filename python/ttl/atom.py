@@ -325,6 +325,12 @@ def _build_atom_spec(
         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
             loaded_names.add(node.id)
 
+    params = _classify_params(fn)
+    local_names = _collect_local_names(fn_def) | {param.name for param in params}
+    captured_values = {
+        capture_name: scope[capture_name]
+        for capture_name in (loaded_names - local_names) & scope.keys()
+    }
     external_pipenets = dict(inlined_pipenets)
     compile_time_captures: Dict[str, Any] = {}
     logical_kernels: Dict[str, Kernel] = dict(inlined_logical_kernels)
@@ -474,7 +480,6 @@ def _build_atom_spec(
     frozen_scope.update(dfb_reconfigurations)
     source = ast.unparse(fn_def)
 
-    params = _classify_params(fn)
     return _AtomSpec(
         name=name,
         operation_identity=operation_identity,
