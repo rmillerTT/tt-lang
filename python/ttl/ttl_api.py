@@ -869,6 +869,7 @@ class CompiledTTNNKernel:
         runtime_resource_cache=None,
         kernel_used_dfb_indices=None,
         kernel_local_tensor_indices=None,
+        unsafe_split_static_dfb_descriptors=False,
     ):
         """
         Initialize with pre-compiled kernel artifacts.
@@ -898,6 +899,8 @@ class CompiledTTNNKernel:
             num_pipe_global_semaphores: Number of GlobalSemaphore-backed
                 PipeNet counters used by this kernel.
             num_dfb_resets: Number of synchronized DFB reset boundaries.
+            unsafe_split_static_dfb_descriptors: Let the runtime split static DFB
+                descriptors per core on L1 overflow (unsafe, temporary).
             kernel_pipe_computed_address_dfb_indices: Per-kernel receiver DFB indices whose
                 L1 bases are supplied as common runtime args.
             kernel_fabric_routes: Per-kernel routing-plane connection metadata.
@@ -946,6 +949,7 @@ class CompiledTTNNKernel:
         self.kernel_line_offsets = kernel_line_offsets or {}
         self.num_pipe_sync_semaphores = num_pipe_sync_semaphores
         self.num_dfb_resets = num_dfb_resets
+        self.unsafe_split_static_dfb_descriptors = unsafe_split_static_dfb_descriptors
         self.pipe_sram_scratch_bytes = pipe_sram_scratch_bytes
         self.num_pipe_global_semaphores = num_pipe_global_semaphores
         self.kernel_pipe_computed_address_dfb_indices = (
@@ -1071,6 +1075,7 @@ class CompiledTTNNKernel:
             program_hash=self.program_hash,
             num_pipe_sync_semaphores=self.num_pipe_sync_semaphores,
             num_dfb_resets=self.num_dfb_resets,
+            unsafe_split_static_dfb_descriptors=self.unsafe_split_static_dfb_descriptors,
             pipe_sram_scratch_bytes=self.pipe_sram_scratch_bytes,
             num_pipe_global_semaphores=self.num_pipe_global_semaphores,
             mesh_program_placements=self.mesh_program_placements,
@@ -1959,6 +1964,7 @@ def _compile_ttnn_kernel(
     operation_name: str = "<anonymous>",
     runtime_resource_factory: Optional[Callable[..., ProgramRuntimeResources]] = None,
     runtime_resource_cache: Optional[KernelRuntimeResourceCache] = None,
+    unsafe_split_static_dfb_descriptors: bool = False,
 ):
     """
     Compile kernel to CompiledTTNNKernel for execution via ttnn.generic_op.
@@ -2248,6 +2254,7 @@ def _compile_ttnn_kernel(
         kernel_line_offsets=kernel_line_offsets,
         num_pipe_sync_semaphores=num_pipe_sync_semaphores,
         num_dfb_resets=num_dfb_resets,
+        unsafe_split_static_dfb_descriptors=unsafe_split_static_dfb_descriptors,
         pipe_sram_scratch_bytes=pipe_sram_scratch_bytes,
         num_pipe_global_semaphores=num_pipe_global_semaphores,
         opaque_include_paths=opaque_include_paths or [],
@@ -2313,6 +2320,7 @@ def _compile_ttnn_kernel(
             kernel_name=operation_name,
             num_pipe_sync_semaphores=num_pipe_sync_semaphores,
             num_dfb_resets=num_dfb_resets,
+            unsafe_split_static_dfb_descriptors=unsafe_split_static_dfb_descriptors,
             pipe_sram_scratch_bytes=pipe_sram_scratch_bytes,
             num_pipe_global_semaphores=num_pipe_global_semaphores,
             mesh_program_placements=mesh_program_placements,
@@ -3633,6 +3641,7 @@ def _lower_program_to_kernel(
             kernel_line_offsets=kernel_line_offsets,
             num_pipe_sync_semaphores=pipe_sync_semaphore_count,
             num_dfb_resets=dfb_reset_count,
+            unsafe_split_static_dfb_descriptors=compiler_options.unsafe_split_static_dfb_descriptors,
             pipe_sram_scratch_bytes=pipe_sram_scratch_bytes,
             num_pipe_global_semaphores=pipe_global_semaphore_count,
             opaque_include_paths=opaque_include_paths,
