@@ -66,7 +66,7 @@ from ._src.atom_rules import (
     validate_resource_declarations,
 )
 from ._src.atom_split import split_function_body
-from ._src.tensor_registry import register_tensor_name
+from ._src.tensor_registry import register_tensor_arguments
 from .compiler_options import CompilerOptions
 from .condition import (
     DispatchCondition,
@@ -772,9 +772,11 @@ def _compile_atom(
 
     # Register ttnn tensors so the per-thread compiler can resolve global
     # tensor indices for its tensor accessors.
-    for idx, (pname, val) in enumerate(bound_arguments.items()):
-        if is_ttnn_tensor(val):
-            register_tensor_name(val, pname, index=idx)
+    register_tensor_arguments(
+        (val, pname, idx)
+        for idx, (pname, val) in enumerate(bound_arguments.items())
+        if is_ttnn_tensor(val)
+    )
 
     _reset_cb_counter()
     _set_current_grid(grid)

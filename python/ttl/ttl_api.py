@@ -79,7 +79,7 @@ from ._src.signpost_profile import is_signpost_profile_enabled
 from ._src.tensor_registry import (
     get_tensor_global_index,
     get_tensor_source,
-    register_tensor_name,
+    register_tensor_arguments,
     register_tensor_source,
 )
 from ._src.global_semaphore import is_ttnn_global_semaphore
@@ -3142,8 +3142,10 @@ def _compile_kernel(
     has_ttnn_tensors = any(is_ttnn_tensor(arg) for arg in args)
 
     compile_args = args
-    for idx, (param_name, arg) in enumerate(zip(f_params, compile_args)):
-        register_tensor_name(arg, param_name, index=idx)
+    register_tensor_arguments(
+        (arg, param_name, idx)
+        for idx, (param_name, arg) in enumerate(zip(f_params, compile_args))
+    )
 
     # For pretty error printing only:
     _track_tensor_sources(f_params, args, kernel_source_file)
