@@ -87,6 +87,7 @@ from ._src.ttl_ast import TTLGenericCompiler
 from .dataflow_buffer import (
     CircularBuffer,
     DataflowBuffer,
+    DFBAddressScope,
     DFBConfigurationEpoch,
     DFBReconfigurationPlan,
     DFBStorageSegment,
@@ -2597,16 +2598,16 @@ def _parse_physical_dfb_config(entry, *, dfb_index: int, context: str):
         if value <= 0:
             raise ValueError(f"{context}.{field} must be positive, got {value}")
 
-    address_scope = (
-        StringAttr(entry["address_scope"]).value
-        if "address_scope" in entry
-        else "local"
-    )
-    if address_scope not in {"local", "remote_uniform"}:
-        raise ValueError(
-            f"{context}.address_scope must be 'local' or 'remote_uniform', "
-            f"got {address_scope!r}"
-        )
+    address_scope = DFBAddressScope.LOCAL
+    if "address_scope" in entry:
+        scope_name = StringAttr(entry["address_scope"]).value
+        try:
+            address_scope = DFBAddressScope(scope_name)
+        except ValueError:
+            raise ValueError(
+                f"{context}.address_scope must be 'local' or 'remote_uniform', "
+                f"got {scope_name!r}"
+            ) from None
 
     allocation_nodes = None
     if "allocation_nodes" in entry:

@@ -40,6 +40,7 @@ from .dfb_allocation_group import DFBAllocationGroup, make_dfb_allocation_group
 from .dfb_reconfiguration import DFBReconfiguration
 from .scalar import ScalarType
 from .dataflow_buffer import (
+    DFBAddressScope,
     make_dataflow_buffer_like,
     make_dfb,
     make_tensor_backed_dfb,
@@ -84,6 +85,7 @@ __all__ = [
     "MeshProgramPlacement",
     "DispatchCondition",
     "DFBReset",
+    "DFBAddressScope",
     "DFBAllocationGroup",
     "DFBReconfiguration",
     "ScalarType",

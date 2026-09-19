@@ -214,9 +214,10 @@ source and restricts it to the exact launch nodes using that source. Sparse
 domains allocate one tensor shard per selected core rather than the area of
 their bounding rectangle.
 
-Each DFB declares the address requirement imposed by its users. The default
-`local` scope permits different L1 addresses on different nodes. Use
-`remote_uniform` when code reads a DFB's local address and uses it as a remote
+Each DFB declares the address requirement imposed by its users through
+`address_scope`, a `ttl.DFBAddressScope` (its string values are accepted). The
+default `LOCAL` scope permits different L1 addresses on different nodes. Use
+`REMOTE_UNIFORM` when code reads a DFB's local address and uses it as a remote
 NoC address: the runtime then creates one descriptor at the same L1 address on
 every allocated node. This scope changes backing-storage placement only. It
 does not change the DFB protocol, physical-index reuse, capacity, or
