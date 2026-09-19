@@ -168,7 +168,9 @@ def test_static_dfb_descriptor_packing_fits_budget(
 
     operation(input_tensor, output_tensor, options="--no-ttl-specialize-cores")
 
-    assert descriptor_orders == [(0, 1, 2)]
+    # The remote-uniform DFB is placed first; the local DFBs follow in a
+    # fitting order.
+    assert descriptor_orders == [(1, 0, 2)]
     actual = ttnn.to_torch(output_tensor).float()
     expected = input_host.float()
     if dtype == torch.bfloat16:
