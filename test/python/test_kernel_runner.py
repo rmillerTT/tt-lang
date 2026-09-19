@@ -1966,8 +1966,7 @@ def test_plan_runtime_resources_requires_each_external_fabric_claim():
 
 
 def test_runtime_resource_fingerprint_is_stable_across_python_hash_seeds():
-    script = textwrap.dedent(
-        """
+    script = textwrap.dedent("""
         from ttl import CoreRuntimeArgs, KernelDefine, KernelKind
         from ttl import KernelRuntimeResources, ProgramRuntimeResources
         from ttl import kernel_runner
@@ -2007,8 +2006,7 @@ def test_runtime_resource_fingerprint_is_stable_across_python_hash_seeds():
             first_free_semaphore_id=0,
         )
         print(plan.structural_fingerprint)
-        """
-    )
+        """)
     fingerprints = []
     for hash_seed in ("1", "937"):
         environment = dict(os.environ)
@@ -6732,12 +6730,8 @@ def test_static_dfb_descriptor_exact_search_finds_nonlocal_reordering(monkeypatc
 
 
 # Splitting descriptors removes allocation coupling between sparse core sets.
-def test_static_dfb_descriptors_split_over_budget_core(monkeypatch):
-    monkeypatch.setattr(kernel_runner, "ttnn", _FakeTTNN())
-    monkeypatch.setattr(kernel_runner, "DEFAULT_L1_CB_BUDGET_BYTES", 10240)
-    monkeypatch.setattr(kernel_runner, "_STATIC_DFB_PACKING_EXACT_PLAN_LIMIT", 2)
-    full_grid = _FakeExplicitCoreRanges((0, 0), (2, 0))
-    configs = [
+def _coupled_static_dfb_configs():
+    return [
         PhysicalDFBConfig(
             physical_index,
             64,
@@ -6756,11 +6750,36 @@ def test_static_dfb_descriptors_split_over_budget_core(monkeypatch):
         )
     ]
 
+
+# Splitting is unsafe: split descriptors give one DFB different addresses on
+# different cores. It stays opt-in until placement honors DFB address scope.
+def test_static_dfb_descriptor_splitting_is_disabled_by_default(monkeypatch):
+    monkeypatch.setattr(kernel_runner, "ttnn", _FakeTTNN())
+    monkeypatch.setattr(kernel_runner, "DEFAULT_L1_CB_BUDGET_BYTES", 10240)
+    monkeypatch.setattr(kernel_runner, "_STATIC_DFB_PACKING_EXACT_PLAN_LIMIT", 2)
+    full_grid = _FakeExplicitCoreRanges((0, 0), (2, 0))
+
+    with pytest.raises(ValueError, match="No static DFB descriptor order fits"):
+        kernel_runner.build_cb_descriptors(
+            tensors=[_FakeTensorWithoutDevice()],
+            cb_configs=_coupled_static_dfb_configs(),
+            core_ranges=full_grid,
+            kernel_specs=[_specialized_spec(full_grid, None)],
+        )
+
+
+def test_static_dfb_descriptors_split_over_budget_core_when_enabled(monkeypatch):
+    monkeypatch.setattr(kernel_runner, "ttnn", _FakeTTNN())
+    monkeypatch.setattr(kernel_runner, "DEFAULT_L1_CB_BUDGET_BYTES", 10240)
+    monkeypatch.setattr(kernel_runner, "_STATIC_DFB_PACKING_EXACT_PLAN_LIMIT", 2)
+    full_grid = _FakeExplicitCoreRanges((0, 0), (2, 0))
+
     descriptors = kernel_runner.build_cb_descriptors(
         tensors=[_FakeTensorWithoutDevice()],
-        cb_configs=configs,
+        cb_configs=_coupled_static_dfb_configs(),
         core_ranges=full_grid,
         kernel_specs=[_specialized_spec(full_grid, None)],
+        unsafe_split_static_dfb_descriptors=True,
     )
 
     assert len(descriptors) == 5

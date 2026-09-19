@@ -3279,9 +3279,19 @@ def _order_static_dfb_descriptor_plans(
     descriptor_plans: List[_DFBDescriptorPlan],
     remaining_bytes_by_core: Dict[Tuple[int, int], int],
     *,
+    split_overflow_cores: bool = False,
     search_unsplit_orders: bool = True,
 ) -> List[_DFBDescriptorPlan]:
-    """Order static descriptors to fit TT-Metal's per-core L1 allocators."""
+    """Order static descriptors to fit TT-Metal's per-core L1 allocators.
+
+    ``split_overflow_cores`` is UNSAFE and TEMPORARY, removed once the
+    compiler-managed SRAM allocator is merged: when no order fits, it
+    splits every plan containing the overflowing core into per-core
+    descriptors. TT-Metal then places the same physical DFB at different L1
+    addresses on different cores, and any kernel that writes that DFB on a
+    remote core by its local address corrupts the remote core. Descriptor
+    placement must honor DFB address scope before splitting can be safe.
+    """
     static_plan_indices = tuple(
         plan_index
         for plan_index, plan in enumerate(descriptor_plans)
@@ -3417,7 +3427,7 @@ def _order_static_dfb_descriptor_plans(
             and overflow_core in plan.nodes
             and len(plan.nodes) > 1
         }
-        if splittable_plan_indices:
+        if split_overflow_cores and splittable_plan_indices:
             split_plans = []
             for plan_index, plan in enumerate(ordered_plans):
                 if plan_index not in splittable_plan_indices:
@@ -3439,6 +3449,7 @@ def _order_static_dfb_descriptor_plans(
             return _order_static_dfb_descriptor_plans(
                 split_plans,
                 remaining_bytes_by_core,
+                split_overflow_cores=True,
                 search_unsplit_orders=False,
             )
 
@@ -3744,6 +3755,7 @@ def _build_dfb_descriptors(
     ],
     remaining_bytes_by_core: Dict[Tuple[int, int], int],
     reconfiguration_plan: Optional[DFBReconfigurationPlan],
+    split_overflow_cores: bool,
 ) -> List[Any]:
     """Build exact-source descriptors and order their static L1 storage."""
 
@@ -3910,7 +3922,9 @@ def _build_dfb_descriptors(
                 )
             )
     descriptor_plans = _order_static_dfb_descriptor_plans(
-        descriptor_plans, remaining_bytes_by_core
+        descriptor_plans,
+        remaining_bytes_by_core,
+        split_overflow_cores=split_overflow_cores,
     )
     return [plan.descriptor for plan in descriptor_plans]
 
@@ -3998,6 +4012,7 @@ def build_cb_descriptors(
         Dict[int, Tuple[_DFBReconfigurationScratchSegment, ...]]
     ] = None,
     dfb_reconfiguration_plan: Optional[DFBReconfigurationPlan] = None,
+    unsafe_split_static_dfb_descriptors: bool = False,
 ) -> List[Any]:
     """
     Build circular buffer descriptors for ttnn.generic_op.
@@ -4015,6 +4030,10 @@ def build_cb_descriptors(
             launch nodes retained across configuration epochs.
         dfb_reconfiguration_plan: Finalized configurations used to size static
             backing for every epoch.
+        unsafe_split_static_dfb_descriptors: UNSAFE, TEMPORARY (removed once
+            the compiler-managed SRAM allocator is merged). Split static
+            descriptors per core when no order fits a core's L1 budget; see
+            ``_order_static_dfb_descriptor_plans``.
 
     Returns:
         List of ttnn.CBDescriptor objects. A configuration with storage
@@ -4130,6 +4149,7 @@ def build_cb_descriptors(
             reconfiguration_scratch_segments,
             remaining_bytes_by_core,
             dfb_reconfiguration_plan,
+            unsafe_split_static_dfb_descriptors,
         )
 
     remaining_bytes = (
@@ -4427,6 +4447,7 @@ def _run_kernel_on_device_impl(
     operation_name: str = "<anonymous>",
     runtime_resource_cache: Optional[KernelRuntimeResourceCache] = None,
     device: Optional[Any] = None,
+    unsafe_split_static_dfb_descriptors: bool = False,
 ) -> Any:
     """
     Execute kernels on device using ttnn.generic_op.
@@ -4570,6 +4591,7 @@ def _run_kernel_on_device_impl(
             reconfiguration_resources.scratch_segments_by_index
         ),
         dfb_reconfiguration_plan=dfb_reconfiguration_plan,
+        unsafe_split_static_dfb_descriptors=unsafe_split_static_dfb_descriptors,
     )
 
     if resource_plan is not None:
@@ -4796,6 +4818,7 @@ def run_kernel_on_device(
     operation_name: str = "<anonymous>",
     runtime_resource_cache: Optional[KernelRuntimeResourceCache] = None,
     device: Optional[Any] = None,
+    unsafe_split_static_dfb_descriptors: bool = False,
 ) -> Any:
     """Execute a kernel, serializing use of persistent runtime resources."""
     if device_domain is not None and not isinstance(device_domain, DeviceDomain):
@@ -4819,6 +4842,7 @@ def run_kernel_on_device(
         "pipe_sram_scratch_bytes": pipe_sram_scratch_bytes,
         "num_pipe_global_semaphores": num_pipe_global_semaphores,
         "num_dfb_resets": num_dfb_resets,
+        "unsafe_split_static_dfb_descriptors": unsafe_split_static_dfb_descriptors,
         "mesh_program_placements": mesh_program_placements,
         "device_domain": device_domain,
         "kernel_fabric_routes": kernel_fabric_routes,
@@ -5047,6 +5071,7 @@ def emit_runner_source(
     requires_runtime_resource_factory: bool = False,
     dfb_reconfiguration_plan: Optional[DFBReconfigurationPlan] = None,
     tensor_configurations: Optional[Sequence[tuple]] = None,
+    unsafe_split_static_dfb_descriptors: bool = False,
 ) -> str:
     """
     Emit Python source code for a standalone runner that invokes ttnn.generic_op.
@@ -5104,6 +5129,9 @@ def emit_runner_source(
     lines.append(f"TENSOR_CONFIGURATIONS = {tensor_configurations!r}")
     lines.append(f"NUM_PIPE_SYNC_SEMAPHORES = {num_pipe_sync_semaphores}")
     lines.append(f"NUM_DFB_RESETS = {num_dfb_resets}")
+    lines.append(
+        f"UNSAFE_SPLIT_STATIC_DFB_DESCRIPTORS = {unsafe_split_static_dfb_descriptors!r}"
+    )
     lines.append(f"PIPE_SRAM_SCRATCH_BYTES = {pipe_sram_scratch_bytes}")
     lines.append(f"NUM_PIPE_GLOBAL_SEMAPHORES = {num_pipe_global_semaphores}")
     if mesh_program_placements is None:
@@ -5339,6 +5367,9 @@ def emit_runner_source(
     lines.append("        program_hash=PROGRAM_HASH,")
     lines.append("        num_pipe_sync_semaphores=NUM_PIPE_SYNC_SEMAPHORES,")
     lines.append("        num_dfb_resets=NUM_DFB_RESETS,")
+    lines.append(
+        "        unsafe_split_static_dfb_descriptors=UNSAFE_SPLIT_STATIC_DFB_DESCRIPTORS,"
+    )
     lines.append("        pipe_sram_scratch_bytes=PIPE_SRAM_SCRATCH_BYTES,")
     lines.append("        num_pipe_global_semaphores=NUM_PIPE_GLOBAL_SEMAPHORES,")
     lines.append("        mesh_program_placements=MESH_PROGRAM_PLACEMENTS,")
@@ -5378,6 +5409,7 @@ def emit_runner_file(
     requires_runtime_resource_factory: bool = False,
     dfb_reconfiguration_plan: Optional[DFBReconfigurationPlan] = None,
     tensor_configurations: Optional[Sequence[tuple]] = None,
+    unsafe_split_static_dfb_descriptors: bool = False,
 ) -> str:
     """
     Emit a Python runner file for the compiled kernel.
@@ -5404,6 +5436,7 @@ def emit_runner_file(
         kernel_name=kernel_name,
         num_pipe_sync_semaphores=num_pipe_sync_semaphores,
         num_dfb_resets=num_dfb_resets,
+        unsafe_split_static_dfb_descriptors=unsafe_split_static_dfb_descriptors,
         pipe_sram_scratch_bytes=pipe_sram_scratch_bytes,
         num_pipe_global_semaphores=num_pipe_global_semaphores,
         mesh_program_placements=mesh_program_placements,
