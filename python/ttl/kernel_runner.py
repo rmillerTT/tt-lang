@@ -22,7 +22,18 @@ import os
 import threading
 import warnings
 import weakref
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    FrozenSet,
+    Iterable,
+    List,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 ttnn = None  # Lazy-loaded via _ensure_ttnn()
 
@@ -3495,10 +3506,17 @@ def _order_static_dfb_descriptor_plans(
     descriptor_plans: List[_DFBDescriptorPlan],
     remaining_bytes_by_core: Dict[Tuple[int, int], int],
     *,
+    uniform_physical_indices: FrozenSet[int] = frozenset(),
     split_overflow_cores: bool = False,
     search_unsplit_orders: bool = True,
 ) -> List[_DFBDescriptorPlan]:
     """Order static descriptors to fit TT-Metal's per-core L1 allocators.
+
+    Plans of ``uniform_physical_indices`` (remote-uniform DFBs) are placed
+    first, widest node set first, and are never split: while every frontier
+    is still equal they cost no padding, and one descriptor is what gives
+    the DFB one L1 address on every node. Ordering and splitting apply to
+    the remaining local-scope plans only.
 
     ``split_overflow_cores`` is UNSAFE and TEMPORARY, removed once the
     compiler-managed SRAM allocator is merged: when no order fits, it
@@ -3515,6 +3533,26 @@ def _order_static_dfb_descriptor_plans(
     )
     if not static_plan_indices:
         return descriptor_plans
+    uniform_plan_indices = tuple(
+        sorted(
+            (
+                plan_index
+                for plan_index in static_plan_indices
+                if descriptor_plans[plan_index].physical_index
+                in uniform_physical_indices
+            ),
+            key=lambda plan_index: (
+                -len(descriptor_plans[plan_index].nodes),
+                descriptor_plans[plan_index].physical_index,
+                plan_index,
+            ),
+        )
+    )
+    local_plan_indices = tuple(
+        plan_index
+        for plan_index in static_plan_indices
+        if descriptor_plans[plan_index].physical_index not in uniform_physical_indices
+    )
 
     # TT-Metal's intersecting range allocators are equivalent to one frontier
     # per selected core: a descriptor starts at the greatest covered frontier.
@@ -3548,8 +3586,9 @@ def _order_static_dfb_descriptor_plans(
     if address_alignment <= 0:
         raise ValueError("TT-Metal reported an invalid DFB address alignment")
 
-    def evaluate_order(order: Tuple[int, ...]) -> _StaticDFBPackingResult:
-        allocator_frontiers = [0] * len(allocator_cores)
+    def place_plans(
+        order: Tuple[int, ...], allocator_frontiers: List[int]
+    ) -> List[int]:
         for plan_index in order:
             plan = descriptor_plans[plan_index]
             allocator_indices = allocator_indices_by_plan[plan_index]
@@ -3560,6 +3599,14 @@ def _order_static_dfb_descriptor_plans(
             end_address = address + plan.total_size
             for allocator_index in allocator_indices:
                 allocator_frontiers[allocator_index] = end_address
+        return allocator_frontiers
+
+    uniform_frontiers = tuple(
+        place_plans(uniform_plan_indices, [0] * len(allocator_cores))
+    )
+
+    def evaluate_order(order: Tuple[int, ...]) -> _StaticDFBPackingResult:
+        allocator_frontiers = place_plans(order, list(uniform_frontiers))
 
         overflow_records = [
             (
@@ -3585,15 +3632,24 @@ def _order_static_dfb_descriptor_plans(
     def packing_score(result: _StaticDFBPackingResult) -> Tuple[int, int]:
         return result.maximum_overflow_bytes, result.packed_bytes
 
-    current_order = static_plan_indices
+    current_order = local_plan_indices
     current_result = evaluate_order(current_order)
+
+    def apply_order(order: Tuple[int, ...]) -> List[_DFBDescriptorPlan]:
+        ordered_plans = list(descriptor_plans)
+        for destination_index, source_index in zip(
+            static_plan_indices, uniform_plan_indices + order
+        ):
+            ordered_plans[destination_index] = descriptor_plans[source_index]
+        return ordered_plans
+
     if current_result.maximum_overflow_bytes == 0:
-        return descriptor_plans
+        return apply_order(current_order)
 
     candidate_orders = [
         tuple(
             sorted(
-                static_plan_indices,
+                local_plan_indices,
                 key=lambda plan_index: (
                     len(descriptor_plans[plan_index].nodes),
                     descriptor_plans[plan_index].physical_index,
@@ -3603,7 +3659,7 @@ def _order_static_dfb_descriptor_plans(
         ),
         tuple(
             sorted(
-                static_plan_indices,
+                local_plan_indices,
                 key=lambda plan_index: (
                     -len(descriptor_plans[plan_index].nodes),
                     descriptor_plans[plan_index].physical_index,
@@ -3622,12 +3678,6 @@ def _order_static_dfb_descriptor_plans(
         )
     current_score, current_order, current_result = min(evaluated_candidates)
 
-    def apply_order(order: Tuple[int, ...]) -> List[_DFBDescriptorPlan]:
-        ordered_plans = list(descriptor_plans)
-        for destination_index, source_index in zip(static_plan_indices, order):
-            ordered_plans[destination_index] = descriptor_plans[source_index]
-        return ordered_plans
-
     def split_overflow_core_or_raise(
         result: _StaticDFBPackingResult,
         order: Tuple[int, ...],
@@ -3642,6 +3692,7 @@ def _order_static_dfb_descriptor_plans(
             if plan.has_static_storage
             and overflow_core in plan.nodes
             and len(plan.nodes) > 1
+            and plan.physical_index not in uniform_physical_indices
         }
         if split_overflow_cores and splittable_plan_indices:
             split_plans = []
@@ -3665,6 +3716,7 @@ def _order_static_dfb_descriptor_plans(
             return _order_static_dfb_descriptor_plans(
                 split_plans,
                 remaining_bytes_by_core,
+                uniform_physical_indices=uniform_physical_indices,
                 split_overflow_cores=True,
                 search_unsplit_orders=False,
             )
@@ -3685,7 +3737,7 @@ def _order_static_dfb_descriptor_plans(
 
     if current_score[0] > 0 and (
         not search_unsplit_orders
-        or len(static_plan_indices) > _STATIC_DFB_PACKING_EXACT_PLAN_LIMIT
+        or len(local_plan_indices) > _STATIC_DFB_PACKING_EXACT_PLAN_LIMIT
     ):
         return split_overflow_core_or_raise(current_result, current_order)
 
@@ -3745,14 +3797,14 @@ def _order_static_dfb_descriptor_plans(
     nondominated_frontiers: Dict[int, List[Tuple[int, ...]]] = {}
     plan_position_by_index = {
         plan_index: plan_position
-        for plan_position, plan_index in enumerate(static_plan_indices)
+        for plan_position, plan_index in enumerate(local_plan_indices)
     }
-    plan_index_by_position = tuple(static_plan_indices)
+    plan_index_by_position = tuple(local_plan_indices)
     allocator_indices_by_position = tuple(
-        allocator_indices_by_plan[plan_index] for plan_index in static_plan_indices
+        allocator_indices_by_plan[plan_index] for plan_index in local_plan_indices
     )
     plan_sizes = tuple(
-        descriptor_plans[plan_index].total_size for plan_index in static_plan_indices
+        descriptor_plans[plan_index].total_size for plan_index in local_plan_indices
     )
     preferred_positions = tuple(
         plan_position_by_index[plan_index] for plan_index in current_order
@@ -3866,8 +3918,8 @@ def _order_static_dfb_descriptor_plans(
         return None
 
     fitting_order = find_fitting_order(
-        (1 << len(static_plan_indices)) - 1,
-        (0,) * len(allocator_cores),
+        (1 << len(local_plan_indices)) - 1,
+        uniform_frontiers,
     )
     if fitting_order is not None:
         return apply_order(fitting_order)
@@ -4138,8 +4190,19 @@ def _build_dfb_descriptors(
                 )
             )
 
-    for dfb_index, config in enumerate(cb_configs):
-        if config.address_scope == DFBAddressScope.LOCAL or not placements[dfb_index]:
+    uniform_physical_indices = frozenset(
+        dfb_index
+        for dfb_index, config in enumerate(cb_configs)
+        if config.address_scope == DFBAddressScope.REMOTE_UNIFORM
+    )
+    descriptor_plans = _order_static_dfb_descriptor_plans(
+        descriptor_plans,
+        remaining_bytes_by_core,
+        uniform_physical_indices=uniform_physical_indices,
+        split_overflow_cores=split_overflow_cores,
+    )
+    for dfb_index in sorted(uniform_physical_indices):
+        if not placements[dfb_index]:
             continue
         matching_plans = [
             plan for plan in descriptor_plans if plan.physical_index == dfb_index
@@ -4147,14 +4210,10 @@ def _build_dfb_descriptors(
         required_nodes = set(placements[dfb_index])
         if len(matching_plans) != 1 or set(matching_plans[0].nodes) != required_nodes:
             raise ValueError(
-                f"DFB[{dfb_index}] address_scope={config.address_scope.value!r} "
-                "requires one descriptor over every allocated node"
+                f"DFB[{dfb_index}] address_scope="
+                f"{cb_configs[dfb_index].address_scope.value!r} requires one "
+                "descriptor over every allocated node"
             )
-    descriptor_plans = _order_static_dfb_descriptor_plans(
-        descriptor_plans,
-        remaining_bytes_by_core,
-        split_overflow_cores=split_overflow_cores,
-    )
     return [plan.descriptor for plan in descriptor_plans]
 
 
