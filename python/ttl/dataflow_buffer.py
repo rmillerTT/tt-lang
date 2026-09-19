@@ -5,6 +5,7 @@
 """Dataflow buffer (DFB) operations for inter-thread communication."""
 
 from dataclasses import dataclass
+from enum import Enum
 import math
 from typing import Any, Optional, Tuple
 
@@ -25,7 +26,30 @@ from .dtype_utils import normalize_tile_dimensions
 from ttl.dialects import ttl
 
 _DFB_DESCRIPTOR_UINT32_MAX = (1 << 32) - 1
-_DFB_ADDRESS_SCOPES = frozenset(("local", "remote_uniform"))
+
+
+class DFBAddressScope(Enum):
+    """L1 address requirement of one DFB across the nodes that use it.
+
+    ``LOCAL`` permits a different L1 address on every node. ``REMOTE_UNIFORM``
+    requires one L1 address on every node, which any writer that addresses the
+    DFB on another node by its own local address depends on.
+    """
+
+    LOCAL = "local"
+    REMOTE_UNIFORM = "remote_uniform"
+
+
+def _resolve_address_scope(value: Any, context: str) -> Optional[DFBAddressScope]:
+    if value is None or isinstance(value, DFBAddressScope):
+        return value
+    try:
+        return DFBAddressScope(value)
+    except ValueError:
+        raise ValueError(
+            f"{context} must be DFBAddressScope.LOCAL, "
+            f"DFBAddressScope.REMOTE_UNIFORM, or None, got {value!r}"
+        ) from None
 
 
 @dataclass(frozen=True)
@@ -189,17 +213,13 @@ class DataflowBuffer:
         byte_offset: int = 0,
         byte_size: Optional[int] = None,
         allocation_group: Optional[DFBAllocationGroup] = None,
-        address_scope: Optional[str] = None,
+        address_scope: Optional[DFBAddressScope] = None,
     ):
         if len(shape) < 2:
             raise ValueError(f"DFB shape must have at least 2 dimensions, got {shape}")
         if block_count < 1 or block_count > 32:
             raise ValueError(f"block_count must be in range [1, 32], got {block_count}")
-        if address_scope is not None and address_scope not in _DFB_ADDRESS_SCOPES:
-            raise ValueError(
-                "DFB address_scope must be 'local', 'remote_uniform', or None, "
-                f"got {address_scope!r}"
-            )
+        address_scope = _resolve_address_scope(address_scope, "DFB address_scope")
         normalized_tile = normalize_tile_dimensions(tile)
         # A buffer's dtype has one source: a backing tensor or an explicit
         # dtype. Supplying both is only valid when they resolve to the same type.
@@ -320,7 +340,15 @@ class PhysicalDFBConfig:
     storage_segments: Tuple["DFBStorageSegment", ...] = ()
     allocation_nodes: Optional[Tuple[Tuple[int, int], ...]] = None
     storage_index: Optional[int] = None
-    address_scope: str = "local"
+    address_scope: DFBAddressScope = DFBAddressScope.LOCAL
+
+    def __post_init__(self):
+        scope = _resolve_address_scope(
+            self.address_scope, f"DFB[{self.dfb_index}] address_scope"
+        )
+        if scope is None:
+            raise ValueError(f"DFB[{self.dfb_index}] address_scope must not be None")
+        object.__setattr__(self, "address_scope", scope)
 
 
 @dataclass(frozen=True)
@@ -359,7 +387,7 @@ def make_dataflow_buffer_like(
     block_count: int = 2,
     *,
     allocation_group: Optional[DFBAllocationGroup] = None,
-    address_scope: Optional[str] = None,
+    address_scope: Optional[DFBAddressScope] = None,
 ) -> DataflowBuffer:
     """
     Create a dataflow buffer with properties derived from a tensor.
@@ -370,9 +398,10 @@ def make_dataflow_buffer_like(
         block_count: Capacity multiplier (default 2 for double-buffering)
         allocation_group: Optional immutable identity requiring compiler-verified
             physical allocation sharing with the other group members
-        address_scope: ``None`` or ``"local"`` permits different L1 addresses
-            on different nodes. ``"remote_uniform"`` requires one L1 address
-            on every node that uses the DFB.
+        address_scope: ``None`` or ``DFBAddressScope.LOCAL`` permits different
+            L1 addresses on different nodes. ``DFBAddressScope.REMOTE_UNIFORM``
+            requires one L1 address on every node that uses the DFB. The
+            enum's string values are accepted.
 
     Returns:
         DataflowBuffer for use in thread function closures
@@ -397,7 +426,7 @@ def make_tensor_backed_dfb(
     block_count: int = 1,
     byte_offset: int = 0,
     allocation_group: Optional[DFBAllocationGroup] = None,
-    address_scope: Optional[str] = None,
+    address_scope: Optional[DFBAddressScope] = None,
 ) -> DataflowBuffer:
     """Bind a DFB's complete capacity to a sharded L1 tensor byte range.
 
@@ -470,7 +499,7 @@ def make_dfb(
     tile: Tuple[int, int] = (DEFAULT_TILE_SIZE, DEFAULT_TILE_SIZE),
     *,
     allocation_group: Optional[DFBAllocationGroup] = None,
-    address_scope: Optional[str] = None,
+    address_scope: Optional[DFBAddressScope] = None,
 ) -> DataflowBuffer:
     """
     Create a dataflow buffer from an explicit dtype, with no backing tensor.
@@ -486,9 +515,10 @@ def make_dfb(
             16, or 32 and widths 16 or 32.
         allocation_group: Optional immutable identity requiring compiler-verified
             physical allocation sharing with the other group members
-        address_scope: ``None`` or ``"local"`` permits different L1 addresses
-            on different nodes. ``"remote_uniform"`` requires one L1 address
-            on every node that uses the DFB.
+        address_scope: ``None`` or ``DFBAddressScope.LOCAL`` permits different
+            L1 addresses on different nodes. ``DFBAddressScope.REMOTE_UNIFORM``
+            requires one L1 address on every node that uses the DFB. The
+            enum's string values are accepted.
 
     Returns:
         DataflowBuffer for use in thread function closures
