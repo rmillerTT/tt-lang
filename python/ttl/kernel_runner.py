@@ -4649,17 +4649,28 @@ def build_program_descriptor(
     kernel_descriptors: List[Any],
     cb_descriptors: List[Any],
     semaphore_descriptors: List[Any],
+    program_l1_layout: str = "uniform",
 ) -> Any:
     """Build the single-device descriptor used by current intra-chip execution."""
     _ensure_ttnn()
     if ttnn is None:
         raise RuntimeError("ttnn is not available")
 
-    return ttnn.ProgramDescriptor(
+    descriptor = ttnn.ProgramDescriptor(
         kernels=kernel_descriptors,
         cbs=cb_descriptors,
         semaphores=semaphore_descriptors,
     )
+    if program_l1_layout == "uniform":
+        descriptor.program_l1_layout = ttnn.ProgramL1Layout.UNIFORM
+    elif program_l1_layout == "per_core":
+        descriptor.program_l1_layout = ttnn.ProgramL1Layout.PER_CORE
+    else:
+        raise ValueError(
+            "program_l1_layout must be 'uniform' or 'per_core', "
+            f"got {program_l1_layout!r}"
+        )
+    return descriptor
 
 
 def _build_mesh_coordinate(coord: Any) -> Any:
@@ -4772,6 +4783,7 @@ def _run_kernel_on_device_impl(
     core_ranges: Any,
     dfb_reconfiguration_plan: Optional[DFBReconfigurationPlan] = None,
     program_hash: Optional[int] = None,
+    program_l1_layout: str = "uniform",
     num_pipe_sync_semaphores: int = 0,
     pipe_sram_scratch_bytes: int = 0,
     num_pipe_global_semaphores: int = 0,
@@ -4802,6 +4814,9 @@ def _run_kernel_on_device_impl(
         dfb_reconfiguration_plan: Optional finalized configuration epochs.
         core_ranges: ttnn.CoreRangeSet for kernel execution.
         program_hash: Hash for tt-metal program cache.
+        program_l1_layout: Static program-image layout contract. ``"uniform"``
+            preserves TT-Metal's default global frontier; ``"per_core"``
+            requires the process-wide TT_METAL_PER_CORE_PROGRAM_SIZE gate.
         num_pipe_sync_semaphores: Number of pipe synchronization semaphores
             allocated by the compiler.
         pipe_sram_scratch_bytes: Per-core SRAM scratch bytes required by
@@ -4925,6 +4940,7 @@ def _run_kernel_on_device_impl(
         ),
         dfb_reconfiguration_plan=dfb_reconfiguration_plan,
         unsafe_split_static_dfb_descriptors=unsafe_split_static_dfb_descriptors,
+        program_l1_layout=program_l1_layout,
     )
 
     if resource_plan is not None:
@@ -4967,6 +4983,7 @@ def _run_kernel_on_device_impl(
             kernel_descriptors=kernel_descriptors,
             cb_descriptors=cb_descriptors,
             semaphore_descriptors=semaphore_descriptors,
+            program_l1_layout=program_l1_layout,
         )
         if normalized_program_hash is not None:
             program_descriptor.custom_program_hash = normalized_program_hash
@@ -5140,6 +5157,7 @@ def run_kernel_on_device(
     core_ranges: Any,
     dfb_reconfiguration_plan: Optional[DFBReconfigurationPlan] = None,
     program_hash: Optional[int] = None,
+    program_l1_layout: str = "uniform",
     num_pipe_sync_semaphores: int = 0,
     pipe_sram_scratch_bytes: int = 0,
     num_pipe_global_semaphores: int = 0,
@@ -5172,6 +5190,7 @@ def run_kernel_on_device(
         "core_ranges": core_ranges,
         "dfb_reconfiguration_plan": dfb_reconfiguration_plan,
         "program_hash": program_hash,
+        "program_l1_layout": program_l1_layout,
         "num_pipe_sync_semaphores": num_pipe_sync_semaphores,
         "pipe_sram_scratch_bytes": pipe_sram_scratch_bytes,
         "num_pipe_global_semaphores": num_pipe_global_semaphores,
@@ -5411,6 +5430,7 @@ def emit_runner_source(
     dfb_reconfiguration_plan: Optional[DFBReconfigurationPlan] = None,
     tensor_configurations: Optional[Sequence[tuple]] = None,
     unsafe_split_static_dfb_descriptors: bool = False,
+    program_l1_layout: str = "uniform",
 ) -> str:
     """
     Emit Python source code for a standalone runner that invokes ttnn.generic_op.
@@ -5466,6 +5486,7 @@ def emit_runner_source(
     lines.append(f"NUM_TENSORS = {num_tensors}")
     lines.append(f"OPERATION_NAME = {kernel_name!r}")
     lines.append(f"PROGRAM_HASH = {normalize_program_hash(program_hash)!r}")
+    lines.append(f"PROGRAM_L1_LAYOUT = {program_l1_layout!r}")
     lines.append(f"TENSOR_CONFIGURATIONS = {tensor_configurations!r}")
     lines.append(f"NUM_PIPE_SYNC_SEMAPHORES = {num_pipe_sync_semaphores}")
     lines.append(f"NUM_DFB_RESETS = {num_dfb_resets}")
@@ -5712,6 +5733,7 @@ def emit_runner_source(
     lines.append("        dfb_reconfiguration_plan=DFB_RECONFIGURATION_PLAN,")
     lines.append("        core_ranges=core_ranges,")
     lines.append("        program_hash=PROGRAM_HASH,")
+    lines.append("        program_l1_layout=PROGRAM_L1_LAYOUT,")
     lines.append("        num_pipe_sync_semaphores=NUM_PIPE_SYNC_SEMAPHORES,")
     lines.append("        num_dfb_resets=NUM_DFB_RESETS,")
     lines.append(
@@ -5757,6 +5779,7 @@ def emit_runner_file(
     dfb_reconfiguration_plan: Optional[DFBReconfigurationPlan] = None,
     tensor_configurations: Optional[Sequence[tuple]] = None,
     unsafe_split_static_dfb_descriptors: bool = False,
+    program_l1_layout: str = "uniform",
 ) -> str:
     """
     Emit a Python runner file for the compiled kernel.
@@ -5779,6 +5802,7 @@ def emit_runner_file(
         grid_rows=grid_rows,
         num_tensors=num_tensors,
         program_hash=program_hash,
+        program_l1_layout=program_l1_layout,
         tensor_configurations=tensor_configurations,
         kernel_name=kernel_name,
         num_pipe_sync_semaphores=num_pipe_sync_semaphores,
