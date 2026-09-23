@@ -208,10 +208,18 @@ def _make_parser() -> argparse.ArgumentParser:
         default=None,
         dest="specialize_cores",
         action=argparse.BooleanOptionalAction,
-        help="Clone each kernel whose structured branch or loop control depends on a "
-        "core coordinate once per launch coordinate, const-folding core_x / "
-        "core_y to resolve that control flow (ttkernel-specialize-cores). "
-        "Opt-in (default: disabled).",
+        help="Create one kernel per launch coordinate when its branches, "
+        "loops, or compile-time table lookups depend on logical core "
+        "coordinates. Constant coordinates allow later compiler passes to "
+        "remove unreachable code and unused table entries (default: disabled).",
+    )
+    p.add_argument(
+        "--ttl-dynamic-noc",
+        default=None,
+        dest="dynamic_noc",
+        action=argparse.BooleanOptionalAction,
+        help="Allow data-movement kernels to select either NOC dynamically "
+        "while retaining their assigned processor (default: disabled).",
     )
     p.add_argument(
         "--ttl-dynamic-noc",
